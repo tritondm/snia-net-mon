@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply bg-ctp-crust font-mono text-[13px] text-ctp-text antialiased;
+  }
+  body {
+    @apply min-h-screen bg-wallpaper bg-fixed;
+  }
+  ::selection {
+    @apply bg-ctp-mauve/30 text-ctp-text;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.ctp.surface1') transparent;
+  }
+}
+
+@layer components {
+  /* "Fenster" im Hyprland-Look: Frosted Glass, feine Kante, rounding 12 */
+  .window {
+    @apply relative rounded-window border border-ctp-surface1/60 bg-ctp-base/70 shadow-window backdrop-blur-xl animate-popin;
+  }
+  /* Aktives Fenster: Verlaufs-Kante teal → mauve wie col.active_border */
+  .window-active {
+    @apply border-transparent shadow-glow;
+    background:
+      linear-gradient(theme('colors.ctp.base / 0.82'), theme('colors.ctp.base / 0.82')) padding-box,
+      theme('backgroundImage.active-border') border-box;
+  }
+  .window-title {
+    @apply flex items-center gap-2 border-b border-ctp-surface0/80 px-4 py-2.5 text-xs uppercase tracking-[0.18em] text-ctp-subtext0;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-lg border border-ctp-surface1/70 bg-ctp-mantle/60 px-2 py-0.5 text-[11px] text-ctp-subtext1;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 whitespace-nowrap rounded-lg border border-ctp-surface1 bg-ctp-surface0/60 px-3 py-1.5 text-ctp-text transition
+      hover:border-ctp-teal/60 hover:bg-ctp-surface0 hover:shadow-glow focus:outline-none focus-visible:ring-2 focus-visible:ring-ctp-teal/60 disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply border-ctp-teal/50 bg-ctp-teal/15 text-ctp-teal hover:bg-ctp-teal/25;
+  }
+  .btn-danger {
+    @apply border-ctp-red/50 bg-ctp-red/10 text-ctp-red hover:border-ctp-red hover:bg-ctp-red/20 hover:shadow-glow-red;
+  }
+  .input {
+    @apply w-full rounded-lg border border-ctp-surface1 bg-ctp-mantle/70 px-3 py-1.5 text-ctp-text placeholder:text-ctp-overlay0
+      focus:border-ctp-mauve/70 focus:outline-none focus:ring-1 focus:ring-ctp-mauve/40;
+  }
+  .label {
+    @apply mb-1 block text-[11px] uppercase tracking-wider text-ctp-overlay1;
+  }
+  .table-flows {
+    @apply w-full border-separate border-spacing-0 text-left text-[12px];
+  }
+  .table-flows th {
+    @apply sticky top-0 z-10 border-b border-ctp-surface0 bg-ctp-mantle/95 px-3 py-2 text-[10px] font-normal uppercase tracking-wider text-ctp-overlay1 backdrop-blur;
+  }
+  .table-flows td {
+    @apply whitespace-nowrap border-b border-ctp-surface0/40 px-3 py-1.5;
+  }
+  .table-flows tbody tr {
+    @apply transition-colors hover:bg-ctp-surface0/40;
+  }
+  /* scharfer System-Indikator (LED) */
+  .led {
+    @apply inline-block h-2 w-2 rounded-full;
+  }
+}

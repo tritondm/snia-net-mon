@@ -1,0 +1,6 @@
+/target
+/data
+/config.toml
+/frontend/node_modules
+/frontend/dist
+*.pcap

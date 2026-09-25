@@ -1,0 +1,14 @@
+[package]
+name = "db"
+description = "SQLite-Speicher (WAL): Ingestion-Pipeline, Abfragen, 72-Stunden-Retention"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+model.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+serde.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

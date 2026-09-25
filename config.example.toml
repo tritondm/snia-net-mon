@@ -1,0 +1,54 @@
+# Snia-Net-Mon – Konfiguration. Kopieren nach config.toml und anpassen:
+#   cp config.example.toml config.toml
+# Alle Werte haben sinnvolle Standards; eine leere config.toml reicht für den Demo-Betrieb.
+
+[server]
+# Web-UI und API. Nur lokal erreichbar; für den Zugriff aus dem Netz z. B. "0.0.0.0:8080" UND api_token setzen.
+listen = "127.0.0.1:8080"
+frontend_dir = "frontend/dist"
+# Optionaler Zugriffsschutz: ist ein Token gesetzt, fragt die Web-UI einmalig danach.
+api_token = ""
+
+[network]
+# Interne Netze – daraus ergibt sich die Richtung jedes Flows:
+#   extern → intern = "in" (Download), intern → extern = "out" (Upload), intern ↔ intern = "internal"
+# Standard sind die privaten Bereiche. Eigene öffentliche Netze ergänzen: das IPv6-Präfix vom Provider
+# (z. B. "2a02:1234:5678::/48") und die WAN-Adresse der pfSense (für eingehende Verbindungen auf die Firewall selbst).
+local_networks = [
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+    "169.254.0.0/16", "127.0.0.0/8", "fc00::/7", "fe80::/10",
+]
+
+[collector]
+# Hierhin schickt die pfSense (softflowd) NetFlow v9 oder IPFIX.
+listen = "0.0.0.0:2055"
+# Mehrere Worker verteilen die Last über SO_REUSEPORT (ein Exporter landet immer beim selben Worker).
+workers = 2
+# Kernel-Empfangspuffer. Für hohe Paketraten zusätzlich: sysctl -w net.core.rmem_max=33554432
+recv_buffer_mb = 16
+
+[storage]
+path = "data/flows.db"
+# Aufbewahrung in Stunden – höchstens 72, größere Werte werden automatisch auf 72 begrenzt.
+retention_hours = 72
+# Wie oft abgelaufene Daten gelöscht werden.
+cleanup_interval_secs = 60
+
+[tracer]
+# "mock" = simulierte Mitschnitte (ohne pfSense), "ssh" = echtes tcpdump auf der pfSense
+backend = "mock"
+storage_dir = "data/traces"
+max_duration_secs = 300
+max_packets = 100000
+max_concurrent = 2
+
+[tracer.ssh]
+host = "192.168.1.1"
+port = 22
+user = "admin"
+# Empfohlen: SSH-Schlüssel (in pfSense unter System > User Manager beim Benutzer hinterlegen)
+private_key = "/home/ich/.ssh/id_ed25519"
+# Alternativ: password = "..."
+# Fingerabdruck des pfSense-Hostschlüssels (Pflicht). Ermitteln mit:
+#   ssh-keyscan -t ed25519 192.168.1.1 2>/dev/null | ssh-keygen -lf -
+host_key_sha256 = "SHA256:..."
