@@ -7,7 +7,7 @@
 <ul class="space-y-1.5">
   {#each items as item, rank (item.key)}
     <li>
-      <button class="group w-full rounded-lg px-2 py-1 text-left transition hover:bg-ctp-surface0/50" onclick={item.onclick} disabled={!item.onclick}>
+      <button class="group w-full rounded-lg px-2 py-1 text-left transition hover:bg-ctp-surface0/50" onclick={item.onclick} disabled={!item.onclick} title={item.title ?? ''}>
         <div class="flex items-baseline gap-2">
           <span class="w-4 text-right text-[10px] text-ctp-overlay0">{rank + 1}</span>
           <span class="truncate group-hover:text-ctp-teal">{item.label}</span>

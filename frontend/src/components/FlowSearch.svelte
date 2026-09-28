@@ -3,14 +3,19 @@
   import Window from './Window.svelte';
   import { api } from '../lib/api.js';
   import { ui, windowMs } from '../lib/state.svelte.js';
-  import { fmtBytes, fmtTime, serviceName, isPrivate, protoColor, toLocalInput, fromLocalInput, DIRECTIONS } from '../lib/format.js';
+  import { fmtBytes, fmtTime, serviceName, isPrivate, protoColor, toLocalInput, fromLocalInput, geoTitle, DIRECTIONS } from '../lib/format.js';
   import DirectionFilter from './DirectionFilter.svelte';
+  import GeoTag from './GeoTag.svelte';
+  import TalkerConnections from './TalkerConnections.svelte';
 
   let form = $state({ ip: '', src: '', dst: '', port: '', proto: '', dir: '', from: '', to: '', limit: 500 });
   let rows = $state([]);
   let loading = $state(false);
   let error = $state('');
   let searched = $state(false);
+  let talkers = $state([]);
+  let connections = $state([]);
+  let talkerLimit = $state(10);
 
   const PROTOS = [['', 'alle'], ['6', 'TCP'], ['17', 'UDP'], ['1', 'ICMP'], ['58', 'ICMPv6'], ['50', 'ESP'], ['47', 'GRE']];
 
@@ -20,13 +25,19 @@
     try {
       const to = fromLocalInput(form.to) || Date.now();
       const from = fromLocalInput(form.from) || to - windowMs();
-      rows = await api('/flows', {
-        query: { ip: form.ip.trim(), src: form.src.trim(), dst: form.dst.trim(), port: form.port, proto: form.proto, dir: form.dir, from, to, limit: form.limit },
-      });
+      const filter = { ip: form.ip.trim(), src: form.src.trim(), dst: form.dst.trim(), port: form.port, proto: form.proto, dir: form.dir, from, to };
+      // Grafik unten: Top Talker mit ihren Verbindungen – aggregiert über alle Treffer, nicht nur die angezeigten Zeilen
+      [rows, talkers, connections] = await Promise.all([
+        api('/flows', { query: { ...filter, limit: form.limit } }),
+        api('/stats/talkers', { query: { ...filter, limit: talkerLimit } }),
+        api('/stats/peers', { query: { ...filter, limit: 2000 } }),
+      ]);
       searched = true;
     } catch (err) {
       error = err.message;
       rows = [];
+      talkers = [];
+      connections = [];
     } finally {
       loading = false;
     }
@@ -35,7 +46,14 @@
   function reset() {
     form = { ip: '', src: '', dst: '', port: '', proto: '', dir: '', from: '', to: '', limit: 500 };
     rows = [];
+    talkers = [];
+    connections = [];
     searched = false;
+  }
+
+  function pickIp(ip) {
+    form.ip = ip;
+    search();
   }
 
   function setRange(hours) {
@@ -58,8 +76,10 @@
   const totals = $derived(rows.reduce((acc, r) => ({ bytes: acc.bytes + r.bytes, packets: acc.packets + r.packets }), { bytes: 0, packets: 0 }));
 
   function exportCsv() {
-    const header = 'zeit,richtung,quelle,quellport,ziel,zielport,proto,bytes,pakete,tcp_flags,exporter';
-    const lines = rows.map((r) => [new Date(r.ts).toISOString(), r.direction, r.src_ip, r.src_port, r.dst_ip, r.dst_port, r.proto_name, r.bytes, r.packets, r.tcp_flags, r.exporter].join(','));
+    const header = 'zeit,richtung,quelle,quellport,quelle_land,quelle_asn,ziel,zielport,ziel_land,ziel_asn,proto,bytes,pakete,tcp_flags,exporter';
+    const lines = rows.map((r) =>
+      [new Date(r.ts).toISOString(), r.direction, r.src_ip, r.src_port, r.src_geo?.cc ?? '', r.src_geo?.asn ?? '', r.dst_ip, r.dst_port, r.dst_geo?.cc ?? '', r.dst_geo?.asn ?? '', r.proto_name, r.bytes, r.packets, r.tcp_flags, r.exporter].join(','),
+    );
     const blob = new Blob([[header, ...lines].join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -107,15 +127,16 @@
       <button class="btn !py-0.5 text-[11px]" onclick={exportCsv} disabled={!rows.length}>⤓ csv</button>
     {/snippet}
     <table class="table-flows">
-      <thead><tr><th>Zeit</th><th title="Richtung">Ri.</th><th>Proto</th><th>Quelle</th><th>Ziel</th><th>Dienst</th><th>Flags</th><th class="text-right">Bytes</th><th class="text-right">Pakete</th><th class="text-right">Dauer</th></tr></thead>
+      <thead><tr><th>Zeit</th><th title="Richtung">Ri.</th><th>Proto</th><th>Quelle</th><th>Ziel</th><th title="Organisation der externen Gegenstelle (GeoIP/ASN)">Netz</th><th>Dienst</th><th>Flags</th><th class="text-right">Bytes</th><th class="text-right">Pakete</th><th class="text-right">Dauer</th></tr></thead>
       <tbody>
         {#each rows as r (r.id)}
           <tr>
             <td class="text-ctp-overlay1">{fmtTime(r.ts, true)}</td>
             <td class="text-base leading-none" style="color: {DIRECTIONS[r.direction]?.color}" title={DIRECTIONS[r.direction]?.title}>{DIRECTIONS[r.direction]?.icon}</td>
             <td><span style="color: {protoColor(r.proto_name)}">{r.proto_name}</span></td>
-            <td><span class={isPrivate(r.src_ip) ? 'text-ctp-sapphire' : ''}>{r.src_ip}</span><span class="text-ctp-overlay0">:{r.src_port}</span></td>
-            <td><span class={isPrivate(r.dst_ip) ? 'text-ctp-sapphire' : ''}>{r.dst_ip}</span><span class="text-ctp-overlay0">:{r.dst_port}</span></td>
+            <td><span class={isPrivate(r.src_ip) ? 'text-ctp-sapphire' : ''}>{r.src_ip}</span><span class="text-ctp-overlay0">:{r.src_port}</span> <GeoTag geo={r.src_geo} /></td>
+            <td><span class={isPrivate(r.dst_ip) ? 'text-ctp-sapphire' : ''}>{r.dst_ip}</span><span class="text-ctp-overlay0">:{r.dst_port}</span> <GeoTag geo={r.dst_geo} /></td>
+            <td class="max-w-[14rem] truncate text-[11px] text-ctp-overlay1" title={geoTitle(r.dst_geo ?? r.src_geo)}>{(r.dst_geo ?? r.src_geo)?.org ?? ''}</td>
             <td class="text-ctp-mauve">{serviceName(Math.min(r.src_port, r.dst_port), r.proto)}</td>
             <td class="text-ctp-peach">{r.proto === 6 ? tcpFlags(r.tcp_flags) : ''}</td>
             <td class="text-right tabular-nums">{fmtBytes(r.bytes)}</td>
@@ -123,9 +144,19 @@
             <td class="text-right tabular-nums text-ctp-overlay1">{((r.ts - r.start_ts) / 1000).toFixed(1)}s</td>
           </tr>
         {:else}
-          <tr><td colspan="10" class="py-16 text-center text-ctp-overlay0">{searched ? 'keine Treffer' : 'Filter setzen und suchen – oder im Dashboard auf eine IP klicken'}</td></tr>
+          <tr><td colspan="11" class="py-16 text-center text-ctp-overlay0">{searched ? 'keine Treffer' : 'Filter setzen und suchen – oder im Dashboard auf eine IP klicken'}</td></tr>
         {/each}
       </tbody>
     </table>
+  </Window>
+
+  <Window title="Top Talker · Verbindungen" subtitle={searched ? 'bytes je ip · segmente = stärkste gegenstellen · ↑ gesendet ↓ empfangen' : ''}>
+    {#snippet actions()}
+      <span class="text-ctp-overlay0">talker</span>
+      {#each [6, 10, 20] as n}
+        <button class="chip !py-0 {talkerLimit === n ? '!border-ctp-mauve/60 text-ctp-mauve' : ''}" onclick={() => { talkerLimit = n; if (searched) search(); }}>{n}</button>
+      {/each}
+    {/snippet}
+    <TalkerConnections {talkers} {connections} onpick={pickIp} />
   </Window>
 </div>

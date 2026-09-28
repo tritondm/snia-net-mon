@@ -1,7 +1,9 @@
 <script>
   // Echtzeit-Durchsatz der letzten 5 Minuten (1 Punkt pro Sekunde, aus dem WebSocket-Stream).
   // Gespiegelt: Download (in) nach oben, Upload (out) nach unten – interner Verkehr als Linie.
+  // Mit gedrückter Maus einen Bereich markieren: Chart hält an und ui.range filtert die aktiven Verbindungen.
   import { live } from '../lib/live.svelte.js';
+  import { ui } from '../lib/state.svelte.js';
   import { DIRECTIONS, fmtBits, fmtTime } from '../lib/format.js';
 
   let width = $state(600);
@@ -13,7 +15,22 @@
   const OUT = DIRECTIONS.out.color;
   const INT = DIRECTIONS.internal.color;
 
-  const points = $derived(live.points);
+  // Beim Markieren wird der Verlauf eingefroren, damit die Auswahl nicht mitwandert
+  let frozen = $state(null);
+  let drag = $state(null); // {a, b} Indizes während des Ziehens
+  let selection = $state(null); // {a, b} Indizes der fertigen Auswahl in `frozen`
+  const points = $derived(frozen ?? live.points);
+
+  // Beim Verlassen des Dashboards die Auswahl aufheben – sonst bliebe die Tabelle ohne sichtbare Markierung angehalten
+  $effect(() => () => (ui.range = null));
+
+  // Auswahl wurde woanders aufgehoben (z. B. "live" in der Verbindungstabelle)
+  $effect(() => {
+    if (!ui.range) {
+      frozen = null;
+      selection = null;
+    }
+  });
   const internal = (p) => Math.max(0, p.bytes - (p.bytes_in ?? 0) - (p.bytes_out ?? 0));
   // Gemeinsame Skala für beide Hälften, damit Download und Upload direkt vergleichbar sind
   const maxBits = $derived(Math.max(1, ...points.map((p) => Math.max(p.bytes_in ?? 0, p.bytes_out ?? 0, internal(p)) * 8)) * 1.1);
@@ -38,17 +55,71 @@
     { y: down(f * maxBits), label: fmtBits(f * maxBits) },
   ]));
 
-  function onMove(event) {
-    if (points.length < 2) return;
+  function indexAt(event) {
     const rect = event.currentTarget.getBoundingClientRect();
     const rel = (event.clientX - rect.left - pad.l) / innerW;
-    const i = Math.round(Math.min(1, Math.max(0, rel)) * (points.length - 1));
-    hover = { i, p: points[i] };
+    return Math.round(Math.min(1, Math.max(0, rel)) * (points.length - 1));
   }
+
+  function onMove(event) {
+    if (points.length < 2) return;
+    const i = indexAt(event);
+    hover = { i, p: points[i] };
+    if (drag) drag.b = i;
+  }
+
+  function onDown(event) {
+    if (event.button !== 0 || points.length < 2) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    frozen ??= live.points;
+    const i = indexAt(event);
+    drag = { a: i, b: i, x: event.clientX };
+  }
+
+  function onUp(event) {
+    if (!drag) return;
+    const { a, b, x: startX } = drag;
+    drag = null;
+    if (Math.abs(event.clientX - startX) < 4) {
+      // Einfacher Klick hebt die Auswahl auf
+      clearRange();
+      return;
+    }
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    selection = { a: lo, b: hi };
+    // Ein Punkt fasst die Sekunde vor seinem Zeitstempel zusammen
+    ui.range = { from: points[lo].ts - 1000, to: points[hi].ts };
+  }
+
+  function clearRange() {
+    ui.range = null;
+    frozen = null;
+    selection = null;
+  }
+
+  const band = $derived.by(() => {
+    const s = drag ?? selection;
+    if (!s || points.length < 2) return null;
+    const [lo, hi] = s.a < s.b ? [s.a, s.b] : [s.b, s.a];
+    return { x: x(lo), w: Math.max(1, x(hi) - x(lo)) };
+  });
 </script>
 
-<div class="relative h-full w-full" bind:clientWidth={width}>
-  <svg {width} {height} class="block" role="img" aria-label="Durchsatz Download/Upload" onmousemove={onMove} onmouseleave={() => (hover = null)}>
+<svelte:window onkeydown={(e) => e.key === 'Escape' && ui.range && clearRange()} />
+
+<div class="relative h-full w-full select-none" bind:clientWidth={width}>
+  <svg
+    {width}
+    {height}
+    class="block cursor-crosshair"
+    role="img"
+    aria-label="Durchsatz Download/Upload – Bereich mit der Maus markieren"
+    onpointermove={onMove}
+    onpointerdown={onDown}
+    onpointerup={onUp}
+    onpointercancel={() => (drag = null)}
+    onpointerleave={() => (hover = null)}
+  >
     <defs>
       <linearGradient id="bw-in" x1="0" x2="0" y1="0" y2="1">
         <stop offset="0" stop-color={IN} stop-opacity="0.5" /><stop offset="1" stop-color={IN} stop-opacity="0.02" />
@@ -75,6 +146,9 @@
     {:else}
       <text x={width / 2} y={mid - 8} text-anchor="middle" class="fill-ctp-overlay0 text-xs">warte auf Daten …</text>
     {/if}
+    {#if band}
+      <rect x={band.x} y={pad.t} width={band.w} height={height - pad.t - pad.b} fill="#f9e2af" fill-opacity="0.12" stroke="#f9e2af" stroke-opacity="0.6" />
+    {/if}
     {#if hover}
       <line x1={x(hover.i)} x2={x(hover.i)} y1={pad.t} y2={height - pad.b} stroke="#cdd6f4" stroke-opacity="0.35" />
       <circle cx={x(hover.i)} cy={up((hover.p.bytes_in ?? 0) * 8)} r="3.5" fill={IN} />
@@ -93,7 +167,12 @@
       <div class="text-ctp-overlay1">{hover.p.flows} flows · {hover.p.packets} pakete</div>
     </div>
   {/if}
-  <div class="absolute right-2 top-0 flex gap-3 text-[10px] text-ctp-overlay1">
+  <div class="absolute right-2 top-0 flex items-center gap-3 text-[10px] text-ctp-overlay1">
+    {#if ui.range}
+      <button class="chip !py-0 !border-ctp-yellow/60 text-ctp-yellow hover:bg-ctp-yellow/10" onclick={clearRange} title="Auswahl aufheben (Esc)">
+        ❚❚ {fmtTime(ui.range.from)} – {fmtTime(ui.range.to)} · ▶ live
+      </button>
+    {/if}
     <span style="color: {IN}">━ download</span><span style="color: {OUT}">━ upload</span><span style="color: {INT}">┅ intern</span>
   </div>
 </div>

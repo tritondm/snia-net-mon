@@ -1,7 +1,7 @@
 <script>
   // Sankey: Quelle → Dienst (Protokoll/Port) → Ziel, gewichtet nach Bytes. Layout mit d3-sankey, Rendering als SVG.
   import { sankey as d3sankey, sankeyLinkHorizontal, sankeyJustify } from 'd3-sankey';
-  import { fmtBytes, isPrivate } from '../lib/format.js';
+  import { fmtBytes, isPrivate, flag } from '../lib/format.js';
   import { searchFor } from '../lib/state.svelte.js';
 
   let { graph = { nodes: [], links: [] } } = $props();
@@ -82,7 +82,7 @@
             tabindex="-1"
             onclick={() => node.kind !== 'service' && searchFor({ ip: node.label })}
             onkeydown={() => {}}
-          >{node.label}</text>
+          >{node.label}{#if node.cc}<tspan class="fill-ctp-overlay1"> {flag(node.cc)} {node.cc}</tspan>{/if}</text>
         </g>
       {/each}
     </svg>

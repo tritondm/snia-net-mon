@@ -34,21 +34,21 @@ retention_hours = 72
 # Wie oft abgelaufene Daten gelöscht werden.
 cleanup_interval_secs = 60
 
-[tracer]
-# "mock" = simulierte Mitschnitte (ohne pfSense), "ssh" = echtes tcpdump auf der pfSense
-backend = "mock"
-storage_dir = "data/traces"
-max_duration_secs = 300
-max_packets = 100000
-max_concurrent = 2
+[geoip]
+# MaxMind GeoLite2 (kostenlos, Konto auf maxmind.com). Fehlende Dateien = keine Geo-Daten, kein Fehler.
+country_db = "data/GeoLite2-Country.mmdb"
+asn_db = "data/GeoLite2-ASN.mmdb"
+# Automatisches Update: Konto-ID und Lizenzschlüssel von maxmind.com (Account → Manage License Keys).
+# Alternativ per Umgebungsvariable MAXMIND_ACCOUNT_ID / MAXMIND_LICENSE_KEY. Leer = kein Download; von außen
+# ersetzte Dateien (z. B. durch geoipupdate) werden trotzdem ohne Neustart neu geladen.
+account_id = ""
+license_key = ""
+update_interval_hours = 24
 
-[tracer.ssh]
-host = "192.168.1.1"
-port = 22
-user = "admin"
-# Empfohlen: SSH-Schlüssel (in pfSense unter System > User Manager beim Benutzer hinterlegen)
-private_key = "/home/ich/.ssh/id_ed25519"
-# Alternativ: password = "..."
-# Fingerabdruck des pfSense-Hostschlüssels (Pflicht). Ermitteln mit:
-#   ssh-keyscan -t ed25519 192.168.1.1 2>/dev/null | ssh-keygen -lf -
-host_key_sha256 = "SHA256:..."
+[pcap]
+# Größte erlaubte Capture-Datei für die PCAP-Analyse.
+max_upload_mb = 512
+# Temporäre Ablage während der Analyse – die Datei wird danach sofort gelöscht.
+upload_dir = "data/uploads"
+# Eigene App-Regeln (JSON, Format wie crates/pcap/apps.json). Auskommentiert = mitgelieferte Regeln.
+# app_rules = "apps.json"

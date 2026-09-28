@@ -9,25 +9,31 @@
 //!   in Blöcken. `secure_delete` überschreibt gelöschte Inhalte in der Datei, danach werden WAL (Checkpoint + Truncate)
 //!   und freie Seiten (`incremental_vacuum`) bereinigt – die Daten sind damit auch forensisch nicht mehr in der Datei.
 //!   Zusätzlich liefert keine Abfrage jemals Daten, die älter als das Retention-Fenster sind.
+//! * **Voraggregation:** Summen je Minute und Stunde (siehe [`rollup`]) machen die Dashboard-Statistiken unabhängig von
+//!   der Zahl der Flows schnell; sie unterliegen derselben Retention.
 
+mod pcap;
 mod query;
+mod rollup;
 mod schema;
 
+pub use pcap::PcapSummary;
+
 pub use query::{
-    DirectionStat, FlowFilter, FlowRow, PortStat, ProtocolStat, SankeyGraph, SankeyLink, SankeyNode, TalkerStat, TimePoint,
+    ConnectionStat, DirectionStat, FlowFilter, FlowRow, PeerStat, PortStat, ProtocolStat, SankeyGraph, SankeyLink, SankeyNode, TalkerStat, TimePoint,
 };
 
 use model::{FlowRecord, MAX_RETENTION_HOURS, ip_to_bytes, now_ms};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
-const HOUR_MS: i64 = 3_600_000;
+use rollup::HOUR_MS;
 /// Anzahl Zeilen pro Lösch-Transaktion – hält die Sperre auf die Datenbank kurz, damit der Writer nicht blockiert.
 const DELETE_CHUNK: usize = 20_000;
 
@@ -89,6 +95,8 @@ struct Inner {
     cleanup_interval: Duration,
     readers: Mutex<Vec<Connection>>,
     counters: Counters,
+    /// Aggregate für Statistiken nutzen (in Tests abschaltbar, um gegen die Rohdaten zu vergleichen)
+    rollups: AtomicBool,
 }
 
 impl Database {
@@ -111,6 +119,7 @@ impl Database {
                 cleanup_interval: config.cleanup_interval,
                 readers: Mutex::new(Vec::new()),
                 counters: Counters::default(),
+                rollups: AtomicBool::new(true),
             }),
         };
         db.inner.counters.rows.store(rows, Relaxed);
@@ -204,7 +213,16 @@ impl Database {
                     break;
                 }
             }
-            if total > 0 {
+            // Aggregate: ganze Minuten/Stunden, sobald sie teilweise vor der Grenze liegen (nie länger als die Rohdaten)
+            for table in rollup::tables() {
+                conn.execute(&format!("DELETE FROM {table} WHERE t < ?1"), params![cutoff_ms])?;
+            }
+            // Gespeicherte PCAP-Analysen unterliegen derselben Frist
+            let pcaps = conn.execute("DELETE FROM pcap_analyses WHERE created_ms < ?1", params![cutoff_ms])?;
+            if pcaps > 0 {
+                tracing::info!(deleted = pcaps, "Retention: alte PCAP-Analysen gelöscht");
+            }
+            if total > 0 || pcaps > 0 {
                 // Freie Seiten zurückgeben und gelöschte Inhalte auch aus dem WAL entfernen
                 conn.execute_batch("PRAGMA incremental_vacuum;")?;
                 conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
@@ -261,6 +279,7 @@ impl Database {
 fn insert_batches(conn: &mut Connection, batches: &[Arc<Vec<FlowRecord>>]) -> Result<usize> {
     let tx = conn.transaction()?;
     let mut count = 0;
+    let mut sums = rollup::Rollup::default();
     {
         let mut stmt = tx.prepare_cached(
             "INSERT INTO flows (ts, start_ts, bucket, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, in_if, out_if, exporter, dir)
@@ -285,9 +304,11 @@ fn insert_batches(conn: &mut Connection, batches: &[Arc<Vec<FlowRecord>>]) -> Re
                 &ip_to_bytes(flow.exporter)[..],
                 flow.direction.as_u8(),
             ])?;
+            sums.add(flow);
             count += 1;
         }
     }
+    sums.write(&tx)?;
     tx.commit()?;
     Ok(count)
 }

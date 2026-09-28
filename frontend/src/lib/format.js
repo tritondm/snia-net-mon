@@ -89,6 +89,18 @@ export function protoColor(name) {
   return PROTO_COLORS[name] ?? PROTO_COLORS.OTHER;
 }
 
+/** Flaggen-Emoji aus einem ISO-Ländercode ("AT" → 🇦🇹). */
+export function flag(cc) {
+  if (!/^[A-Za-z]{2}$/.test(cc ?? '')) return '';
+  return String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+}
+
+/** Tooltip-Text zu GeoIP-Daten: "Österreich · AS8447 A1 Telekom Austria AG". */
+export function geoTitle(geo) {
+  if (!geo) return '';
+  return [geo.country ?? geo.cc, geo.asn ? `AS${geo.asn} ${geo.org ?? ''}`.trim() : ''].filter(Boolean).join(' · ');
+}
+
 /** Aus einem Unix-ms-Wert einen Wert für <input type="datetime-local"> (lokale Zeit) machen und zurück. */
 export function toLocalInput(ms) {
   const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60_000);

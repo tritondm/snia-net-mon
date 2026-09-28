@@ -2,35 +2,46 @@
 //! Frontends (Single-Page-App) für alle übrigen Pfade.
 
 mod live;
+mod pcap;
 
 pub use live::LiveHub;
 
-use axum::body::Body;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{Query, Request, State};
+use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use collector::CollectorMetrics;
 use db::{Database, DbError, FlowFilter};
+use geo::{GeoInfo, GeoLookup};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tower_http::services::{ServeDir, ServeFile};
-use tracer::{TraceError, TraceRequest, Tracer};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
-    pub tracer: Tracer,
     pub metrics: Arc<CollectorMetrics>,
     pub live: LiveHub,
     /// Ist ein Token gesetzt, verlangt jede API-Anfrage `Authorization: Bearer <token>` (WebSocket/Download: `?token=`).
     pub api_token: Option<Arc<str>>,
     pub started_ms: i64,
+    pub geo: Arc<GeoLookup>,
+    pub pcap: PcapSettings,
+}
+
+#[derive(Clone)]
+pub struct PcapSettings {
+    /// Verzeichnis für temporäre Upload-Dateien (werden nach der Analyse gelöscht)
+    pub upload_dir: PathBuf,
+    pub max_upload_bytes: u64,
+    pub apps: Arc<::pcap::AppRules>,
 }
 
 pub fn router(state: AppState, frontend_dir: PathBuf) -> Router {
@@ -44,12 +55,12 @@ pub fn router(state: AppState, frontend_dir: PathBuf) -> Router {
         .route("/stats/directions", get(directions))
         .route("/stats/timeseries", get(timeseries))
         .route("/stats/sankey", get(sankey))
+        .route("/stats/connections", get(connections))
+        .route("/stats/peers", get(peers))
+        .route("/stats/geo", get(geo_stats))
+        .route("/pcap", get(pcap::list).post(pcap::upload).layer(DefaultBodyLimit::disable()))
+        .route("/pcap/{id}", get(pcap::get).merge(delete(pcap::delete)))
         .route("/live", get(live_ws))
-        .route("/traces", get(list_traces).post(start_trace))
-        .route("/traces/{id}", get(get_trace).delete(delete_trace))
-        .route("/traces/{id}/stop", post(stop_trace))
-        .route("/traces/{id}/pcap", get(download_pcap))
-        .route("/traces/{id}/packets", get(trace_packets))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state);
 
@@ -79,18 +90,6 @@ impl From<DbError> for ApiError {
                 ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Datenbankfehler".into())
             }
         }
-    }
-}
-
-impl From<TraceError> for ApiError {
-    fn from(err: TraceError) -> Self {
-        let status = match &err {
-            TraceError::Invalid(_) => StatusCode::BAD_REQUEST,
-            TraceError::NotFound => StatusCode::NOT_FOUND,
-            TraceError::TooMany(_) => StatusCode::TOO_MANY_REQUESTS,
-            TraceError::Io(_) | TraceError::Pcap(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        ApiError(status, err.to_string())
     }
 }
 
@@ -132,7 +131,11 @@ struct Status {
     retention_hours: u64,
     collector: collector::MetricsSnapshot,
     db: db::DbStats,
-    tracer_backend: &'static str,
+    geoip: &'static str,
+    /// Erstellungsdatum der ältesten geladenen GeoIP-Datenbank (Unix-ms)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geoip_built_ms: Option<i64>,
+    pcap_max_upload_mb: u64,
 }
 
 async fn status(State(s): State<AppState>) -> ApiResult<Status> {
@@ -143,16 +146,105 @@ async fn status(State(s): State<AppState>) -> ApiResult<Status> {
         retention_hours: db.retention_hours,
         collector: s.metrics.snapshot(),
         db,
-        tracer_backend: s.tracer.backend_name(),
+        geoip: s.geo.describe(),
+        geoip_built_ms: {
+            let (country, asn) = s.geo.build_epochs();
+            country.into_iter().chain(asn).min().map(|secs| secs as i64 * 1000)
+        },
+        pcap_max_upload_mb: s.pcap.max_upload_bytes / 1024 / 1024,
     }))
 }
 
-async fn flows(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::FlowRow>> {
-    Ok(Json(s.db.query_flows(f).await?))
+/// Datensatz mit GeoIP-Daten für Quelle und Ziel (nur öffentliche IPs; leere Felder entfallen).
+#[derive(Serialize)]
+struct WithPeerGeo<T> {
+    #[serde(flatten)]
+    row: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    src_geo: Option<GeoInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dst_geo: Option<GeoInfo>,
 }
 
-async fn talkers(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::TalkerStat>> {
-    Ok(Json(s.db.top_talkers(f).await?))
+#[derive(Serialize)]
+struct WithGeo<T> {
+    #[serde(flatten)]
+    row: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geo: Option<GeoInfo>,
+}
+
+async fn flows(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::FlowRow>>> {
+    let rows = s.db.query_flows(f).await?;
+    Ok(Json(rows.into_iter().map(|row| WithPeerGeo { src_geo: s.geo.lookup_str(&row.src_ip), dst_geo: s.geo.lookup_str(&row.dst_ip), row }).collect()))
+}
+
+async fn talkers(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithGeo<db::TalkerStat>>> {
+    let rows = s.db.top_talkers(f).await?;
+    Ok(Json(rows.into_iter().map(|row| WithGeo { geo: s.geo.lookup_str(&row.ip), row }).collect()))
+}
+
+#[derive(Serialize, Default)]
+struct GeoBucket {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    country: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asn: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    org: Option<String>,
+    bytes: i64,
+    flows: i64,
+    ips: u32,
+}
+
+#[derive(Serialize)]
+struct GeoStats {
+    countries: Vec<GeoBucket>,
+    asns: Vec<GeoBucket>,
+    /// Verkehr externer IPs ohne Treffer in der GeoIP-Datenbank
+    unknown_bytes: i64,
+    enabled: bool,
+}
+
+/// Verkehr externer Gegenstellen nach Land und autonomem System (je IP summiert, dann gruppiert).
+async fn geo_stats(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<GeoStats> {
+    let limit = f.limit.unwrap_or(10).clamp(1, 50) as usize;
+    let ips = s.db.ip_totals(f, 50_000).await?;
+    let mut countries: HashMap<String, GeoBucket> = HashMap::new();
+    let mut asns: HashMap<u32, GeoBucket> = HashMap::new();
+    let mut unknown_bytes = 0;
+    for t in ips {
+        let Ok(ip) = t.ip.parse() else { continue };
+        if !geo::is_public(ip) {
+            continue;
+        }
+        let g = s.geo.lookup(ip);
+        if g.is_empty() {
+            unknown_bytes += t.bytes;
+            continue;
+        }
+        if let Some(cc) = &g.cc {
+            let b = countries.entry(cc.clone()).or_insert_with(|| GeoBucket { cc: g.cc.clone(), country: g.country.clone(), ..Default::default() });
+            (b.bytes, b.flows, b.ips) = (b.bytes + t.bytes, b.flows + t.flows, b.ips + 1);
+        }
+        if let Some(asn) = g.asn {
+            let b = asns.entry(asn).or_insert_with(|| GeoBucket { asn: Some(asn), org: g.org.clone(), cc: g.cc.clone(), ..Default::default() });
+            (b.bytes, b.flows, b.ips) = (b.bytes + t.bytes, b.flows + t.flows, b.ips + 1);
+        }
+    }
+    let top = |mut v: Vec<GeoBucket>| {
+        v.sort_by_key(|b| std::cmp::Reverse(b.bytes));
+        v.truncate(limit);
+        v
+    };
+    Ok(Json(GeoStats {
+        countries: top(countries.into_values().collect()),
+        asns: top(asns.into_values().collect()),
+        unknown_bytes,
+        enabled: s.geo.enabled(),
+    }))
 }
 
 async fn ports(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::PortStat>> {
@@ -185,8 +277,22 @@ async fn timeseries(State(s): State<AppState>, Query(f): Query<FlowFilter>, Quer
     Ok(Json(Series { step_ms, points }))
 }
 
+async fn connections(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::ConnectionStat>>> {
+    let rows = s.db.connections(f).await?;
+    Ok(Json(rows.into_iter().map(|row| WithPeerGeo { src_geo: s.geo.lookup_str(&row.src_ip), dst_geo: s.geo.lookup_str(&row.dst_ip), row }).collect()))
+}
+
+async fn peers(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::PeerStat>>> {
+    let rows = s.db.peers(f).await?;
+    Ok(Json(rows.into_iter().map(|row| WithPeerGeo { src_geo: s.geo.lookup_str(&row.src_ip), dst_geo: s.geo.lookup_str(&row.dst_ip), row }).collect()))
+}
+
 async fn sankey(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<db::SankeyGraph> {
-    Ok(Json(s.db.sankey(f).await?))
+    let mut graph = s.db.sankey(f).await?;
+    for node in graph.nodes.iter_mut().filter(|n| n.kind != "service") {
+        node.cc = s.geo.lookup_str(&node.label).and_then(|g| g.cc);
+    }
+    Ok(Json(graph))
 }
 
 async fn live_ws(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
@@ -216,55 +322,4 @@ async fn live_session(mut socket: WebSocket, hub: LiveHub) {
             },
         }
     }
-}
-
-async fn list_traces(State(s): State<AppState>) -> Json<Vec<tracer::TraceInfo>> {
-    Json(s.tracer.list())
-}
-
-async fn start_trace(State(s): State<AppState>, Json(request): Json<TraceRequest>) -> Result<(StatusCode, Json<tracer::TraceInfo>), ApiError> {
-    let tracer = s.tracer.clone();
-    let info = tokio::task::spawn_blocking(move || tracer.start(request))
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Task abgebrochen".into()))??;
-    Ok((StatusCode::CREATED, Json(info)))
-}
-
-async fn get_trace(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<tracer::TraceInfo> {
-    Ok(Json(s.tracer.get(&id)?))
-}
-
-async fn stop_trace(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<tracer::TraceInfo> {
-    Ok(Json(s.tracer.stop(&id)?))
-}
-
-async fn delete_trace(State(s): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
-    s.tracer.delete(&id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// PCAP-Datei als Stream (funktioniert auch während eines laufenden Traces – liefert den bisherigen Stand).
-async fn download_pcap(State(s): State<AppState>, Path(id): Path<String>) -> Result<Response, ApiError> {
-    let path = s.tracer.pcap_path(&id)?;
-    let file = tokio::fs::File::open(&path).await.map_err(|_| ApiError(StatusCode::NOT_FOUND, "PCAP-Datei nicht vorhanden".into()))?;
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/vnd.tcpdump.pcap"));
-    let disposition = format!("attachment; filename=\"trace-{id}.pcap\"");
-    headers.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).unwrap_or(HeaderValue::from_static("attachment")));
-    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
-    Ok((headers, body).into_response())
-}
-
-#[derive(Deserialize)]
-struct PageParams {
-    offset: Option<usize>,
-    limit: Option<usize>,
-}
-
-async fn trace_packets(State(s): State<AppState>, Path(id): Path<String>, Query(p): Query<PageParams>) -> ApiResult<tracer::pcap::PacketPage> {
-    let tracer = s.tracer.clone();
-    let page = tokio::task::spawn_blocking(move || tracer.packets(&id, p.offset.unwrap_or(0), p.limit.unwrap_or(200)))
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Task abgebrochen".into()))??;
-    Ok(Json(page))
 }

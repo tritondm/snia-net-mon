@@ -13,7 +13,7 @@
   const workspaces = [
     { key: 'dashboard', n: 1, label: 'dashboard' },
     { key: 'flows', n: 2, label: 'flows' },
-    { key: 'trace', n: 3, label: 'trace' },
+    { key: 'pcap', n: 3, label: 'pcap' },
   ];
 
   const drops = $derived((live.collector?.dropped_flows ?? 0) + (live.collector?.parse_errors ?? 0));

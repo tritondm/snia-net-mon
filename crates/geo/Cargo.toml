@@ -1,0 +1,11 @@
+[package]
+name = "geo"
+description = "GeoIP-Anreicherung (Land, ASN) aus MaxMind-GeoLite2-Datenbanken"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+tracing.workspace = true
+maxminddb.workspace = true

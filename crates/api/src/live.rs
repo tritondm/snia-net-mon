@@ -3,6 +3,7 @@
 //! geteilt – die Kosten sind unabhängig von der Anzahl der Clients.
 
 use collector::{CollectorMetrics, MetricsSnapshot};
+use geo::{GeoInfo, GeoLookup};
 use model::{Direction, FlowKey, FlowRecord, now_ms, proto_name};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -31,6 +32,10 @@ pub struct ActiveConnection {
     pub last_seen: i64,
     /// Bytes, die in der letzten Sekunde dazukamen.
     pub recent_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_geo: Option<GeoInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_geo: Option<GeoInfo>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -83,7 +88,12 @@ pub struct LiveHub {
 
 impl LiveHub {
     /// Hub starten: konsumiert Flow-Batches vom Collector und sendet jede Sekunde einen Snapshot.
-    pub fn spawn(mut rx: mpsc::Receiver<Arc<Vec<FlowRecord>>>, metrics: Arc<CollectorMetrics>, mut shutdown: watch::Receiver<bool>) -> Self {
+    pub fn spawn(
+        mut rx: mpsc::Receiver<Arc<Vec<FlowRecord>>>,
+        metrics: Arc<CollectorMetrics>,
+        geo: Arc<GeoLookup>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Self {
         let (tx, _) = broadcast::channel(16);
         let hub = Self { tx: tx.clone(), history: Arc::new(Mutex::new(VecDeque::with_capacity(HISTORY_POINTS))) };
         let history = hub.history.clone();
@@ -134,7 +144,7 @@ impl LiveHub {
                             h.push_back(rate);
                         }
                         if tx.receiver_count() > 0 {
-                            let connections = top_connections(&table);
+                            let connections = top_connections(&table, &geo);
                             let message = LiveMessage::Tick { ts: now, rate, active: table.len(), connections: &connections, collector: metrics.snapshot() };
                             if let Ok(json) = serde_json::to_string(&message) {
                                 let _ = tx.send(Arc::from(json));
@@ -161,7 +171,7 @@ impl LiveHub {
 }
 
 /// Die Verbindungen mit dem meisten aktuellen Verkehr (dann Gesamtvolumen) – partielle Sortierung, O(n).
-fn top_connections(table: &HashMap<FlowKey, Entry>) -> Vec<ActiveConnection> {
+fn top_connections(table: &HashMap<FlowKey, Entry>, geo: &GeoLookup) -> Vec<ActiveConnection> {
     let mut entries: Vec<(&FlowKey, &Entry)> = table.iter().collect();
     let rank = |e: &Entry| (e.recent_bytes, e.bytes);
     if entries.len() > TOP_CONNECTIONS {
@@ -185,6 +195,8 @@ fn top_connections(table: &HashMap<FlowKey, Entry>) -> Vec<ActiveConnection> {
             first_seen: e.first_seen,
             last_seen: e.last_seen,
             recent_bytes: e.recent_bytes,
+            src_geo: geo.lookup_opt(k.src_ip),
+            dst_geo: geo.lookup_opt(k.dst_ip),
         })
         .collect()
 }

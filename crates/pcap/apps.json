@@ -1,0 +1,105 @@
+{
+  "youtube": {
+    "label": "YouTube",
+    "domains": [
+      "youtube.com", "youtu.be", "googlevideo.com", "ytimg.com",
+      "ytstatic.com", "youtube-nocookie.com", "_youtube._tcp.local"
+    ],
+    "ip_prefixes": []
+  },
+  "microsoft-365": {
+    "label": "Microsoft 365",
+    "domains": [
+      "office.com", "office.net", "office365.com", "outlook.com",
+      "outlook.office.com", "outlook.office365.com", "sharepoint.com",
+      "sharepoint-df.com", "onedrive.com", "1drv.ms", "onmicrosoft.com",
+      "microsoftonline.com", "msftauth.net", "msauth.net",
+      "graph.microsoft.com", "onenote.com", "teams.microsoft.com",
+      "lync.com", "officeapps.live.com", "sfbassets.com", "s-microsoft.com",
+      "office.com", "office365.com"
+    ],
+    "ip_prefixes": []
+  },
+  "cdn": {
+    "label": "CDN",
+    "domains": [
+      "cloudflare.net", "cloudfront.net", "akamai.net", "akamaiedge.net",
+      "akamaized.net", "edgesuite.net", "edgekey.net", "fastly.net",
+      "fastlylb.net", "azureedge.net", "azurefd.net", "edgecastcdn.net",
+      "cachefly.net", "imgix.net", "stackpathcdn.com", "jsdelivr.net"
+    ],
+    "ip_prefixes": []
+  },
+  "ai": {
+    "label": "AI",
+    "domains": [
+      "openai.com", "chatgpt.com", "oaistatic.com", "oaicdn.com",
+      "anthropic.com", "claude.ai", "gemini.google.com", "aistudio.google.com",
+      "deepmind.google", "copilot.microsoft.com", "x.ai", "grok.com",
+      "perplexity.ai", "huggingface.co", "replicate.com", "midjourney.com"
+    ],
+    "ip_prefixes": []
+  },
+  "netflix": {
+    "label": "Netflix",
+    "domains": [
+      "netflix.com", "netflix.net", "nflxso.net", "nflxvideo.net",
+      "nflximg.net", "nflxext.com", "nflxsearch.net"
+    ],
+    "ip_prefixes": []
+  },
+  "spotify": {
+    "label": "Spotify",
+    "domains": ["spotify.com", "spotifycdn.com", "scdn.co", "spoti.fi"],
+    "ip_prefixes": []
+  },
+  "twitch": {
+    "label": "Twitch",
+    "domains": ["twitch.tv", "ttvnw.net", "jtvnw.net", "twitchcdn.net", "ext-twitch.tv"],
+    "ip_prefixes": []
+  },
+  "discord": {
+    "label": "Discord",
+    "domains": [
+      "discord.com", "discord.gg", "discordapp.com", "discordapp.net",
+      "discord.media", "discord-attachments.com"
+    ],
+    "ip_prefixes": []
+  },
+  "whatsapp": {
+    "label": "WhatsApp",
+    "domains": ["whatsapp.com", "whatsapp.net", "wa.me"],
+    "ip_prefixes": []
+  },
+  "telegram": {
+    "label": "Telegram",
+    "domains": ["telegram.org", "t.me", "telegram.me"],
+    "ip_prefixes": []
+  },
+  "signal": {
+    "label": "Signal",
+    "domains": ["signal.org", "whisper.systems"],
+    "ip_prefixes": []
+  },
+  "tiktok": {
+    "label": "TikTok",
+    "domains": [
+      "tiktok.com", "tiktokcdn.com", "tiktokcdn-us.com", "tiktokv.com",
+      "byteoversea.net", "musical.ly"
+    ],
+    "ip_prefixes": []
+  },
+  "meta": {
+    "label": "Meta (FB/Instagram)",
+    "domains": [
+      "facebook.com", "fb.com", "facebook.net", "fbcdn.net", "fb.watch",
+      "messenger.com", "instagram.com", "cdninstagram.com", "instagramcdn.com"
+    ],
+    "ip_prefixes": []
+  },
+  "x": {
+    "label": "X / Twitter",
+    "domains": ["x.com", "twitter.com", "twimg.com", "t.co"],
+    "ip_prefixes": []
+  }
+}

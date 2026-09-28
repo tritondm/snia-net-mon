@@ -24,6 +24,20 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_dir {
         conn.execute_batch("ALTER TABLE flows ADD COLUMN dir INTEGER NOT NULL DEFAULT 0;")?;
     }
+    // Version 2: Voraggregation – bei bestehenden Dateien einmalig aus den gespeicherten Flows aufbauen
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 2 {
+        let started = std::time::Instant::now();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = crate::rollup::create_tables(conn)
+            .and_then(|_| crate::rollup::backfill(conn))
+            .and_then(|_| conn.execute_batch("PRAGMA user_version = 2; COMMIT"));
+        if let Err(err) = result {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(err);
+        }
+        tracing::info!(ms = started.elapsed().as_millis() as u64, "Aggregat-Tabellen angelegt");
+    }
     Ok(())
 }
 
@@ -52,6 +66,16 @@ fn create(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_flows_ts       ON flows (ts);
          CREATE INDEX IF NOT EXISTS idx_flows_src_ts   ON flows (src_ip, ts);
          CREATE INDEX IF NOT EXISTS idx_flows_dst_ts   ON flows (dst_ip, ts);
-         CREATE INDEX IF NOT EXISTS idx_flows_dport_ts ON flows (dst_port, ts);",
+         CREATE INDEX IF NOT EXISTS idx_flows_dport_ts ON flows (dst_port, ts);
+         CREATE TABLE IF NOT EXISTS pcap_analyses (
+             id         INTEGER PRIMARY KEY,
+             created_ms INTEGER NOT NULL,   -- Zeitpunkt der Analyse, Unix-ms (Grundlage der Retention)
+             name       TEXT    NOT NULL,   -- ursprünglicher Dateiname
+             size       INTEGER NOT NULL,   -- Dateigröße in Byte
+             packets    INTEGER NOT NULL,
+             bytes      INTEGER NOT NULL,
+             result     TEXT    NOT NULL    -- Analyse-Ergebnis als JSON
+         );
+         CREATE INDEX IF NOT EXISTS idx_pcap_created ON pcap_analyses (created_ms);",
     )
 }

@@ -1,5 +1,6 @@
 //! Lese-Abfragen: Flow-Suche und Aggregationen für die Dashboard-Widgets.
 
+use crate::rollup::{self, Kind, Level};
 use crate::{Database, DbError, Result};
 use model::{Direction, cidr_range, ip_from_bytes, now_ms, proto_name};
 use rusqlite::types::Value;
@@ -90,12 +91,46 @@ pub struct DirectionStat {
     pub bps: f64,
 }
 
+/// Verbindung (5-Tupel) mit dem summierten Verkehr aller ihrer Flows im Zeitfenster.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectionStat {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub proto_name: &'static str,
+    pub direction: Direction,
+    pub bytes: i64,
+    pub packets: i64,
+    pub flows: i64,
+    pub first_seen: i64,
+    pub last_seen: i64,
+}
+
+/// Verkehr zwischen zwei IPs über einen Dienst (Protokoll + Dienst-Port), Client-Ports zusammengefasst.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerStat {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub proto: u8,
+    pub proto_name: &'static str,
+    /// Dienst-Port (der kleinere der beiden Ports); 0 bei Protokollen ohne Ports
+    pub port: u16,
+    pub bytes: i64,
+    pub packets: i64,
+    pub flows: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SankeyNode {
     pub id: String,
     pub label: String,
     /// "src", "service" oder "dst" – bestimmt die Spalte im Diagramm.
     pub kind: &'static str,
+    /// Ländercode der IP (wird von der API aus GeoIP ergänzt)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,17 +146,32 @@ pub struct SankeyGraph {
     pub links: Vec<SankeyLink>,
 }
 
-/// Dienst-Port eines Flows: der kleinere der beiden Ports. softflowd exportiert Anfrage (Client → Server) und Antwort
-/// (Server → Client) getrennt; bei der Antwort steht der Dienst-Port (443, 53, 22 …) auf der Quellseite, der
-/// Client-Port ist in beiden Fällen der größere (ephemere) Port.
-const SERVICE_PORT: &str = "MIN(src_port, dst_port)";
-
 /// Aus einem Filter gebaute WHERE-Klausel mit Parametern.
 struct Where {
     sql: String,
     params: Vec<Value>,
     from: i64,
     to: i64,
+}
+
+/// Datenquelle einer Aggregations-Abfrage: Aggregate + Rand-Flows, oder nur Einzel-Flows, wenn der Filter Felder
+/// enthält, die in den Aggregaten nicht vorkommen (IP, Port, Protokoll).
+struct Plan {
+    w: Where,
+    rollup: Option<(Vec<rollup::Segment>, Option<u8>)>,
+}
+
+impl Plan {
+    fn source(&self, kind: Kind) -> (String, Vec<Value>) {
+        match &self.rollup {
+            Some((segments, dir)) => rollup::source(kind, segments, *dir),
+            None => rollup::raw_source(kind, &self.w.sql, &self.w.params),
+        }
+    }
+
+    fn seconds(&self) -> f64 {
+        ((self.w.to - self.w.from) as f64 / 1000.0).max(1.0)
+    }
 }
 
 impl Database {
@@ -172,6 +222,25 @@ impl Database {
         Ok(Where { sql, params, from, to })
     }
 
+    /// Abfrageplan für Statistiken; `max` begrenzt die gröbste Zeitauflösung der Aggregate.
+    fn plan(&self, f: &FlowFilter, max: Level) -> Result<Plan> {
+        let w = self.build_where(f)?;
+        let blank = |v: &Option<String>| v.as_deref().is_none_or(|s| s.trim().is_empty());
+        let aggregatable = blank(&f.ip) && blank(&f.src) && blank(&f.dst) && f.port.is_none() && f.proto.is_none();
+        if !aggregatable || max == Level::Raw || !self.inner.rollups.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(Plan { w, rollup: None });
+        }
+        let dir = f.dir.as_deref().map(str::trim).filter(|s| !s.is_empty()).and_then(Direction::parse).map(Direction::as_u8);
+        // `to` ist inklusive, Abschnitte sind halboffen
+        let segments = rollup::segments(w.from, w.to + 1, max);
+        Ok(Plan { w, rollup: Some((segments, dir)) })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_rollups(&self, on: bool) {
+        self.inner.rollups.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Flows suchen (neueste zuerst).
     pub async fn query_flows(&self, filter: FlowFilter) -> Result<Vec<FlowRow>> {
         let w = self.build_where(&filter)?;
@@ -209,19 +278,21 @@ impl Database {
 
     /// Top Talker: Summe über Quelle UND Ziel je IP (eine IP zählt, egal in welche Richtung sie Verkehr erzeugt).
     pub async fn top_talkers(&self, filter: FlowFilter) -> Result<Vec<TalkerStat>> {
-        let w = self.build_where(&filter)?;
-        let limit = filter.limit.unwrap_or(10).clamp(1, 100) as i64;
-        let seconds = ((w.to - w.from) as f64 / 1000.0).max(1.0);
+        let limit = filter.limit.unwrap_or(10).clamp(1, 100);
+        self.talkers(filter, limit).await
+    }
+
+    /// Volumen je IP für bis zu `limit` IPs (Grundlage der Länder-/ASN-Statistik).
+    pub async fn ip_totals(&self, filter: FlowFilter, limit: u32) -> Result<Vec<TalkerStat>> {
+        self.talkers(filter, limit.clamp(1, 100_000)).await
+    }
+
+    async fn talkers(&self, filter: FlowFilter, limit: u32) -> Result<Vec<TalkerStat>> {
+        let plan = self.plan(&filter, Level::Hour)?;
+        let seconds = plan.seconds();
         self.with_reader(move |conn| {
-            let sql = format!(
-                "SELECT ip, SUM(bytes), SUM(packets), COUNT(*) FROM (
-                    SELECT src_ip AS ip, bytes, packets FROM flows WHERE {0}
-                    UNION ALL
-                    SELECT dst_ip AS ip, bytes, packets FROM flows WHERE {0}
-                 ) GROUP BY ip ORDER BY 2 DESC LIMIT {limit}",
-                w.sql
-            );
-            let params: Vec<&Value> = w.params.iter().chain(w.params.iter()).collect();
+            let (source, params) = plan.source(Kind::Ip);
+            let sql = format!("SELECT ip, SUM(bytes), SUM(packets), SUM(flows) FROM ({source}) GROUP BY ip ORDER BY 2 DESC LIMIT {limit}");
             let mut stmt = conn.prepare_cached(&sql)?;
             let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
                 let bytes: i64 = r.get(1)?;
@@ -240,17 +311,16 @@ impl Database {
 
     /// Top Dienst-Ports (nur TCP/UDP/SCTP – ICMP hat keine Ports).
     pub async fn top_ports(&self, filter: FlowFilter) -> Result<Vec<PortStat>> {
-        let w = self.build_where(&filter)?;
+        let plan = self.plan(&filter, Level::Hour)?;
         let limit = filter.limit.unwrap_or(10).clamp(1, 100) as i64;
         self.with_reader(move |conn| {
+            let (source, params) = plan.source(Kind::Svc);
             let sql = format!(
-                "SELECT {SERVICE_PORT} AS port, proto, SUM(bytes), COUNT(*) FROM flows
-                 WHERE {} AND proto IN (6, 17, 132)
-                 GROUP BY port, proto ORDER BY 3 DESC LIMIT {limit}",
-                w.sql
+                "SELECT port, proto, SUM(bytes), SUM(flows) FROM ({source})
+                 WHERE proto IN (6, 17, 132) GROUP BY port, proto ORDER BY 3 DESC LIMIT {limit}"
             );
             let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
                 let proto: u8 = r.get(1)?;
                 Ok(PortStat { port: r.get(0)?, proto, proto_name: proto_name(proto), bytes: r.get(2)?, flows: r.get(3)? })
             })?;
@@ -260,14 +330,12 @@ impl Database {
     }
 
     pub async fn protocols(&self, filter: FlowFilter) -> Result<Vec<ProtocolStat>> {
-        let w = self.build_where(&filter)?;
+        let plan = self.plan(&filter, Level::Hour)?;
         self.with_reader(move |conn| {
-            let sql = format!(
-                "SELECT proto, SUM(bytes), SUM(packets), COUNT(*) FROM flows WHERE {} GROUP BY proto ORDER BY 2 DESC",
-                w.sql
-            );
+            let (source, params) = plan.source(Kind::Svc);
+            let sql = format!("SELECT proto, SUM(bytes), SUM(packets), SUM(flows) FROM ({source}) GROUP BY proto ORDER BY 2 DESC");
             let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
                 let proto: u8 = r.get(0)?;
                 Ok(ProtocolStat { proto, proto_name: proto_name(proto), bytes: r.get(1)?, packets: r.get(2)?, flows: r.get(3)? })
             })?;
@@ -276,20 +344,24 @@ impl Database {
         .await
     }
 
-    /// Zeitreihe mit ca. `points` Stützstellen über das Zeitfenster.
+    /// Zeitreihe mit ca. `points` Stützstellen über das Zeitfenster. Ab einer Minute Schrittweite wird der Schritt auf
+    /// ganze Minuten (ab einer Stunde auf ganze Stunden) gerundet, damit jede Stützstelle ganze Aggregate enthält.
     pub async fn timeseries(&self, filter: FlowFilter, points: u32) -> Result<(i64, Vec<TimePoint>)> {
         let w = self.build_where(&filter)?;
         let points = points.clamp(10, 1000) as i64;
-        let step = ((w.to - w.from) / points).max(1000);
+        let mut step = ((w.to - w.from) / points).max(1000);
+        let level = [Level::Hour, Level::Minute].into_iter().find(|l| step >= l.ms()).unwrap_or(Level::Raw);
+        step = (step + level.ms() - 1) / level.ms() * level.ms();
+        let plan = self.plan(&filter, level)?;
         self.with_reader(move |conn| {
+            let (source, params) = plan.source(Kind::Svc);
             let sql = format!(
-                "SELECT (ts / {step}) * {step} AS slot, SUM(bytes), SUM(packets), COUNT(*),
+                "SELECT (t / {step}) * {step} AS slot, SUM(bytes), SUM(packets), SUM(flows),
                         SUM(CASE WHEN dir = 1 THEN bytes ELSE 0 END), SUM(CASE WHEN dir = 2 THEN bytes ELSE 0 END)
-                 FROM flows WHERE {} GROUP BY slot ORDER BY slot",
-                w.sql
+                 FROM ({source}) GROUP BY slot ORDER BY slot"
             );
             let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
                 Ok(TimePoint { ts: r.get(0)?, bytes: r.get(1)?, packets: r.get(2)?, flows: r.get(3)?, bytes_in: r.get(4)?, bytes_out: r.get(5)? })
             })?;
             Ok((step, rows.collect::<rusqlite::Result<Vec<_>>>()?))
@@ -299,13 +371,14 @@ impl Database {
 
     /// Verkehr je Richtung (Download, Upload, intern, extern) im Zeitfenster.
     pub async fn directions(&self, filter: FlowFilter) -> Result<Vec<DirectionStat>> {
-        let w = self.build_where(&filter)?;
-        let seconds = ((w.to - w.from) as f64 / 1000.0).max(1.0);
+        let plan = self.plan(&filter, Level::Hour)?;
+        let seconds = plan.seconds();
         let found = self
             .with_reader(move |conn| {
-                let sql = format!("SELECT dir, SUM(bytes), SUM(packets), COUNT(*) FROM flows WHERE {} GROUP BY dir", w.sql);
+                let (source, params) = plan.source(Kind::Svc);
+                let sql = format!("SELECT dir, SUM(bytes), SUM(packets), SUM(flows) FROM ({source}) GROUP BY dir");
                 let mut stmt = conn.prepare_cached(&sql)?;
-                let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
+                let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
                     Ok((Direction::from_u8(r.get(0)?), r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
                 })?;
                 Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -325,19 +398,81 @@ impl Database {
             .collect())
     }
 
+    /// Verbindungen (5-Tupel) mit dem meisten Verkehr im Zeitfenster.
+    pub async fn connections(&self, filter: FlowFilter) -> Result<Vec<ConnectionStat>> {
+        let w = self.build_where(&filter)?;
+        let limit = filter.limit.unwrap_or(200).clamp(1, 2000) as i64;
+        self.with_reader(move |conn| {
+            let sql = format!(
+                "SELECT src_ip, dst_ip, src_port, dst_port, proto, MAX(dir), SUM(bytes), SUM(packets), COUNT(*), MIN(start_ts), MAX(ts)
+                 FROM flows WHERE {} GROUP BY src_ip, dst_ip, src_port, dst_port, proto ORDER BY 7 DESC LIMIT {limit}",
+                w.sql
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
+                let proto: u8 = r.get(4)?;
+                Ok(ConnectionStat {
+                    src_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(0)?).to_string(),
+                    dst_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(1)?).to_string(),
+                    src_port: r.get(2)?,
+                    dst_port: r.get(3)?,
+                    proto,
+                    proto_name: proto_name(proto),
+                    direction: Direction::from_u8(r.get(5)?),
+                    bytes: r.get(6)?,
+                    packets: r.get(7)?,
+                    flows: r.get(8)?,
+                    first_seen: r.get(9)?,
+                    last_seen: r.get(10)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    /// Stärkste Gegenstellen-Paare (Quelle, Ziel, Dienst) im Zeitfenster – Client-Ports zusammengefasst.
+    pub async fn peers(&self, filter: FlowFilter) -> Result<Vec<PeerStat>> {
+        let plan = self.plan(&filter, Level::Hour)?;
+        let limit = filter.limit.unwrap_or(200).clamp(1, 5000) as i64;
+        self.with_reader(move |conn| {
+            let (source, params) = plan.source(Kind::Pair);
+            let sql = format!(
+                "SELECT src_ip, dst_ip, proto, port, SUM(bytes), SUM(packets), SUM(flows) FROM ({source})
+                 GROUP BY src_ip, dst_ip, proto, port ORDER BY 5 DESC LIMIT {limit}"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+                let proto: u8 = r.get(2)?;
+                Ok(PeerStat {
+                    src_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(0)?).to_string(),
+                    dst_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(1)?).to_string(),
+                    proto,
+                    proto_name: proto_name(proto),
+                    port: r.get(3)?,
+                    bytes: r.get(4)?,
+                    packets: r.get(5)?,
+                    flows: r.get(6)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
     /// Sankey-Graph: Quelle → Dienst (Protokoll/Port) → Ziel, die `limit` stärksten Verbindungen nach Bytes.
     pub async fn sankey(&self, filter: FlowFilter) -> Result<SankeyGraph> {
-        let w = self.build_where(&filter)?;
+        let plan = self.plan(&filter, Level::Hour)?;
         let limit = filter.limit.unwrap_or(25).clamp(1, 200) as i64;
         let rows = self
             .with_reader(move |conn| {
+                let (source, params) = plan.source(Kind::Pair);
                 let sql = format!(
-                    "SELECT src_ip, proto, {SERVICE_PORT} AS port, dst_ip, SUM(bytes) FROM flows WHERE {}
-                     GROUP BY src_ip, proto, port, dst_ip ORDER BY 5 DESC LIMIT {limit}",
-                    w.sql
+                    "SELECT src_ip, proto, port, dst_ip, SUM(bytes) FROM ({source})
+                     GROUP BY src_ip, proto, port, dst_ip ORDER BY 5 DESC LIMIT {limit}"
                 );
                 let mut stmt = conn.prepare_cached(&sql)?;
-                let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
+                let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
                     Ok((
                         ip_from_bytes(&r.get::<_, Vec<u8>>(0)?).to_string(),
                         r.get::<_, u8>(1)?,
@@ -359,7 +494,7 @@ fn build_sankey(rows: Vec<(String, u8, u16, String, i64)>) -> SankeyGraph {
     let mut links: HashMap<(String, String), i64> = HashMap::new();
     let mut add_node = |graph: &mut SankeyGraph, id: String, label: String, kind: &'static str| {
         if seen.insert(id.clone(), ()).is_none() {
-            graph.nodes.push(SankeyNode { id, label, kind });
+            graph.nodes.push(SankeyNode { id, label, kind, cc: None });
         }
     };
     for (src, proto, port, dst, bytes) in rows {

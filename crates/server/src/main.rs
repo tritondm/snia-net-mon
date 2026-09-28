@@ -1,11 +1,13 @@
-//! Snia-Net-Mon – Einstiegspunkt: Konfiguration laden und Collector, Speicher, Tracer und Web-Server verdrahten.
+//! Snia-Net-Mon – Einstiegspunkt: Konfiguration laden und Collector, Speicher und Web-Server verdrahten.
 //!
 //! Datenfluss:
 //! ```text
 //! pfSense (softflowd) ──UDP 2055──▶ collector ──batch──┬──▶ db (Writer-Thread → SQLite, Retention-Task)
 //!                                                      └──▶ api::LiveHub ──WebSocket──▶ Browser
-//! Browser ──REST──▶ api ──▶ db (Abfragen) / tracer ──SSH──▶ tcpdump auf der pfSense
+//! Browser ──REST──▶ api ──▶ db (Abfragen)
 //! ```
+
+mod geoupdate;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -22,7 +24,10 @@ struct Config {
     network: NetworkSection,
     collector: CollectorSection,
     storage: StorageSection,
-    tracer: TracerSection,
+    geoip: GeoipSection,
+    pcap: PcapSection,
+    /// Früherer Abschnitt `[tracer]` – wird nur noch toleriert, damit alte config.toml-Dateien weiter laden.
+    tracer: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,38 +85,69 @@ impl Default for StorageSection {
     }
 }
 
+/// MaxMind-GeoLite2-Datenbanken (kostenlos nach Registrierung bei maxmind.com). Fehlende Dateien = keine Geo-Daten.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct TracerSection {
-    backend: String,
-    storage_dir: PathBuf,
-    max_duration_secs: u32,
-    max_packets: u32,
-    max_concurrent: usize,
-    ssh: Option<SshSection>,
+struct GeoipSection {
+    country_db: PathBuf,
+    asn_db: PathBuf,
+    /// Für das automatische Update (maxmind.com → Manage License Keys). Alternativ per Umgebungsvariable
+    /// `MAXMIND_ACCOUNT_ID` / `MAXMIND_LICENSE_KEY`, damit der Schlüssel nicht in der Datei stehen muss.
+    account_id: String,
+    license_key: String,
+    /// Wie oft nach einer neuen Ausgabe gesucht wird
+    update_interval_hours: u64,
 }
 
-impl Default for TracerSection {
+impl Default for GeoipSection {
     fn default() -> Self {
-        Self { backend: "mock".into(), storage_dir: "data/traces".into(), max_duration_secs: 300, max_packets: 100_000, max_concurrent: 2, ssh: None }
+        Self {
+            country_db: "data/GeoLite2-Country.mmdb".into(),
+            asn_db: "data/GeoLite2-ASN.mmdb".into(),
+            account_id: String::new(),
+            license_key: String::new(),
+            update_interval_hours: 24,
+        }
+    }
+}
+
+impl GeoipSection {
+    fn credentials(&self) -> Option<geoupdate::Credentials> {
+        let pick = |env: &str, value: &str| {
+            std::env::var(env).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| value.to_string()).trim().to_string()
+        };
+        let account_id = pick("MAXMIND_ACCOUNT_ID", &self.account_id);
+        let license_key = pick("MAXMIND_LICENSE_KEY", &self.license_key);
+        match (account_id.is_empty(), license_key.is_empty()) {
+            (false, false) if !account_id.bytes().all(|b| b.is_ascii_digit()) => {
+                let hint = if license_key.bytes().all(|b| b.is_ascii_digit()) { " – account_id und license_key vertauscht?" } else { "" };
+                tracing::warn!("GeoIP-Update: account_id muss die Konto-Nummer (nur Ziffern) sein{hint} – automatisches Update ist aus");
+                None
+            }
+            (false, false) => Some(geoupdate::Credentials { account_id, license_key }),
+            (true, true) => None,
+            _ => {
+                tracing::warn!("GeoIP-Update braucht account_id UND license_key – automatisches Update ist aus");
+                None
+            }
+        }
     }
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SshSection {
-    host: String,
-    #[serde(default = "default_ssh_port")]
-    port: u16,
-    user: String,
-    private_key: Option<PathBuf>,
-    private_key_passphrase: Option<String>,
-    password: Option<String>,
-    host_key_sha256: Option<String>,
+#[serde(default, deny_unknown_fields)]
+struct PcapSection {
+    max_upload_mb: u64,
+    /// Eigene App-Regeln (JSON wie crates/pcap/apps.json); leer = mitgelieferte Regeln
+    app_rules: Option<PathBuf>,
+    /// Ablage für Uploads während der Analyse
+    upload_dir: PathBuf,
 }
 
-fn default_ssh_port() -> u16 {
-    22
+impl Default for PcapSection {
+    fn default() -> Self {
+        Self { max_upload_mb: 512, app_rules: None, upload_dir: "data/uploads".into() }
+    }
 }
 
 fn load_config() -> Result<Config> {
@@ -138,31 +174,15 @@ fn load_config() -> Result<Config> {
     }
 }
 
-fn tracer_backend(section: &TracerSection) -> Result<tracer::Backend> {
-    match section.backend.as_str() {
-        "mock" => Ok(tracer::Backend::Mock),
-        "ssh" => {
-            let ssh = section.ssh.as_ref().context("tracer.backend = \"ssh\" braucht einen Abschnitt [tracer.ssh]")?;
-            Ok(tracer::Backend::Ssh(tracer::SshConfig {
-                host: ssh.host.clone(),
-                port: ssh.port,
-                user: ssh.user.clone(),
-                private_key: ssh.private_key.clone(),
-                private_key_passphrase: ssh.private_key_passphrase.clone(),
-                password: ssh.password.clone(),
-                host_key_sha256: ssh.host_key_sha256.clone().filter(|s| s.starts_with("SHA256:") && s.len() > 10),
-            }))
-        }
-        other => anyhow::bail!("unbekanntes tracer.backend {other:?} (erlaubt: \"mock\", \"ssh\")"),
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tower_http=warn".into()))
         .init();
     let config = load_config()?;
+    if config.tracer.is_some() {
+        tracing::warn!("Abschnitt [tracer] in der Konfiguration wird ignoriert (Tracing wurde entfernt)");
+    }
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // --- Speicher
@@ -181,8 +201,21 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("network.local_networks: {e}"))?;
     tracing::info!(networks = ?config.network.local_networks, "interne Netze für die Richtungserkennung");
     let metrics = Arc::new(collector::CollectorMetrics::default());
+    let geo = Arc::new(geo::GeoLookup::open(Some(&config.geoip.country_db), Some(&config.geoip.asn_db)));
+    let geo_credentials = config.geoip.credentials();
+    if !geo.enabled() && geo_credentials.is_none() {
+        tracing::warn!("keine GeoIP-Datenbanken gefunden – Länder/ASN bleiben leer (siehe [geoip] in config.example.toml)");
+    }
+    let geo_updater = geoupdate::spawn(
+        geo.clone(),
+        geoupdate::UpdaterConfig {
+            credentials: geo_credentials,
+            interval: Duration::from_secs(config.geoip.update_interval_hours.clamp(1, 24 * 30) * 3600),
+        },
+        shutdown_rx.clone(),
+    );
     let (live_tx, live_rx) = mpsc::channel(256);
-    let live = api::LiveHub::spawn(live_rx, metrics.clone(), shutdown_rx.clone());
+    let live = api::LiveHub::spawn(live_rx, metrics.clone(), geo.clone(), shutdown_rx.clone());
     let collectors = collector::spawn_collector(
         collector::CollectorConfig {
             bind: config.collector.listen,
@@ -197,35 +230,6 @@ async fn main() -> Result<()> {
     )
     .with_context(|| format!("UDP {} konnte nicht geöffnet werden", config.collector.listen))?;
 
-    // --- Tracer (gleiche Retention wie die Flow-Daten)
-    let tracer = tracer::Tracer::new(tracer::TracerConfig {
-        backend: tracer_backend(&config.tracer)?,
-        storage_dir: config.tracer.storage_dir.clone(),
-        max_duration_secs: config.tracer.max_duration_secs.clamp(1, 3600),
-        max_packets: config.tracer.max_packets.max(1),
-        max_concurrent: config.tracer.max_concurrent.max(1),
-        retention_hours: config.storage.retention_hours,
-    })?;
-    tracing::info!(backend = tracer.backend_name(), "Tracer bereit");
-    let trace_cleanup = {
-        let tracer = tracer.clone();
-        let mut shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        let t = tracer.clone();
-                        if let Ok(n) = tokio::task::spawn_blocking(move || t.cleanup_expired()).await && n > 0 {
-                            tracing::info!(deleted = n, "Retention: alte Traces gelöscht");
-                        }
-                    }
-                    _ = shutdown.changed() => if *shutdown.borrow() { return },
-                }
-            }
-        })
-    };
-
     // --- Web-Server
     let token = config.server.api_token.trim();
     if token.is_empty() && !config.server.listen.ip().is_loopback() {
@@ -233,12 +237,26 @@ async fn main() -> Result<()> {
     }
     let state = api::AppState {
         db: database.clone(),
-        tracer,
         metrics,
         live,
         api_token: (!token.is_empty()).then(|| Arc::from(token)),
         started_ms: model::now_ms(),
+        geo,
+        pcap: api::PcapSettings {
+            upload_dir: config.pcap.upload_dir.clone(),
+            max_upload_bytes: config.pcap.max_upload_mb.clamp(1, 16 * 1024) * 1024 * 1024,
+            apps: Arc::new(match &config.pcap.app_rules {
+                Some(path) => pcap::AppRules::load(path),
+                None => pcap::AppRules::builtin(),
+            }),
+        },
     };
+    // Reste abgebrochener Uploads (z. B. nach einem Absturz) entfernen
+    if let Ok(entries) = std::fs::read_dir(&config.pcap.upload_dir) {
+        for entry in entries.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
     if !config.server.frontend_dir.join("index.html").exists() {
         tracing::warn!(dir = %config.server.frontend_dir.display(), "Frontend nicht gebaut (cd frontend && npm install && npm run build) – nur die API ist verfügbar");
     }
@@ -255,7 +273,8 @@ async fn main() -> Result<()> {
     for handle in collectors {
         let _ = handle.await;
     }
-    let _ = tokio::join!(cleanup, trace_cleanup);
+    let _ = cleanup.await;
+    geo_updater.abort();
     tokio::task::spawn_blocking(move || writer.join()).await?.ok();
     tracing::info!("beendet");
     Ok(())

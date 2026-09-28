@@ -2,7 +2,7 @@
   import TopBar from './components/TopBar.svelte';
   import Dashboard from './components/Dashboard.svelte';
   import FlowSearch from './components/FlowSearch.svelte';
-  import TracePanel from './components/TracePanel.svelte';
+  import PcapAnalyzer from './components/PcapAnalyzer.svelte';
   import TokenDialog from './components/TokenDialog.svelte';
   import { ui } from './lib/state.svelte.js';
   import { live } from './lib/live.svelte.js';
@@ -10,8 +10,8 @@
 
   let status = $state(null);
 
-  // Workspace in der URL (#dashboard, #flows, #trace) – Links und Zurück-Taste funktionieren
-  const WORKSPACES = ['dashboard', 'flows', 'trace'];
+  // Workspace in der URL (#dashboard, #flows, #pcap) – Links und Zurück-Taste funktionieren
+  const WORKSPACES = ['dashboard', 'flows', 'pcap'];
   const fromHash = () => {
     const key = location.hash.slice(1);
     if (WORKSPACES.includes(key)) ui.workspace = key;
@@ -32,7 +32,7 @@
   // Tastenkürzel wie in Hyprland: Alt+1/2/3 wechselt den Workspace
   function onKey(event) {
     if (!event.altKey) return;
-    const target = { 1: 'dashboard', 2: 'flows', 3: 'trace' }[event.key];
+    const target = WORKSPACES[Number(event.key) - 1];
     if (target) {
       ui.workspace = target;
       event.preventDefault();
@@ -50,11 +50,12 @@
     {:else if ui.workspace === 'flows'}
       <FlowSearch />
     {:else}
-      <TracePanel backend={status?.tracer_backend ?? 'mock'} />
+      <PcapAnalyzer />
     {/if}
   </main>
   <footer class="px-4 pb-2 text-[10px] text-ctp-overlay0">
-    daten werden nach {status?.retention_hours ?? 72} h automatisch gelöscht · catppuccin mocha
+    daten werden nach {status?.retention_hours ?? 72} h automatisch gelöscht · geoip {status?.geoip ?? '–'}{#if status?.geoip_built_ms}
+      · stand {new Date(status.geoip_built_ms).toLocaleDateString('de-AT')}{/if} (maxmind geolite2) · catppuccin mocha
   </footer>
 </div>
 
