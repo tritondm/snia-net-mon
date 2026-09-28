@@ -276,3 +276,8 @@ cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (
 ## Lizenz
 
 [MIT](LICENSE) – frei nutzbar, veränderbar und weitergebbar, solange der Copyright-Hinweis erhalten bleibt. Ohne Gewährleistung.
+
+Enthaltene Fremdinhalte: Länderflaggen aus [Twemoji](https://github.com/twitter/twemoji) (© Twitter, Inc. und
+Mitwirkende, [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)), als Schrift über
+[country-flag-emoji-polyfill](https://github.com/talkjs/country-flag-emoji-polyfill) (MIT). GeoIP-Daten von MaxMind
+GeoLite2 werden nicht mitgeliefert (eigene Lizenz, siehe [GeoIP-Datenbanken](#geoip-datenbanken)).

@@ -38,7 +38,7 @@ export default {
     extend: {
       colors: { ctp: mocha },
       fontFamily: {
-        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        mono: ['"Twemoji Country Flags"', '"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       borderRadius: {
         // Hyprland: decoration { rounding = 12 }
