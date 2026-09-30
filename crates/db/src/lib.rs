@@ -38,8 +38,11 @@ use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
 use rollup::{HOUR_MS, MINUTE_MS};
-/// Anzahl Zeilen pro Lösch-Transaktion – hält die Sperre auf die Datenbank kurz, damit der Writer nicht blockiert.
-const DELETE_CHUNK: usize = 20_000;
+/// Anzahl Zeilen pro Lösch-Transaktion – hält die Sperre auf die Datenbank kurz, damit der Writer nicht blockiert
+/// (auf langsamen Platten dauerten 20 000 Zeilen länger als das Busy-Timeout von 10 s).
+const DELETE_CHUNK: usize = 5_000;
+/// So oft versucht der Writer eine gesperrte Datenbank erneut (jeweils mit 10 s Busy-Timeout), bevor er verwirft.
+const WRITE_ATTEMPTS: u32 = 6;
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -200,7 +203,15 @@ impl Database {
                     }
                 }
                 let started = Instant::now();
-                match insert_batches(&mut conn, &pending) {
+                let mut result = insert_batches(&mut conn, &pending);
+                for attempt in 2..=WRITE_ATTEMPTS {
+                    if !result.as_ref().is_err_and(is_busy) {
+                        break;
+                    }
+                    tracing::warn!(attempt, rows, "Datenbank gesperrt – Flows werden erneut geschrieben");
+                    result = insert_batches(&mut conn, &pending);
+                }
+                match result {
                     Ok(n) => {
                         let c = &db.inner.counters;
                         c.inserted.fetch_add(n as u64, Relaxed);
@@ -347,6 +358,12 @@ impl Database {
         })
         .await?
     }
+}
+
+/// Datenbank von einer anderen Verbindung gesperrt (Busy-Timeout abgelaufen) – ein erneuter Versuch kann gelingen.
+fn is_busy(err: &DbError) -> bool {
+    matches!(err, DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+        if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
 }
 
 fn insert_batches(conn: &mut Connection, batches: &[Arc<Vec<FlowRecord>>]) -> Result<usize> {

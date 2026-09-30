@@ -521,3 +521,20 @@ async fn history_rotates_into_compressed_archive_that_can_be_opened_and_expires(
     assert!(history.archives().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writer_retries_when_database_stays_locked_longer_than_busy_timeout() {
+    let (db, dir) = temp_db("locked");
+    // Eine andere Verbindung hält die Schreibsperre länger als das Busy-Timeout von 10 s (wie ein langsames DELETE)
+    let blocker = schema::open_connection(&dir.join("flows.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(12));
+        blocker.execute_batch("COMMIT").unwrap();
+    });
+    ingest(&db, vec![flow(now_ms() - 60_000, "10.0.0.1", "1.1.1.1", 443, 100)]).await;
+    release.join().unwrap();
+    let all = db.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap();
+    assert_eq!(all.len(), 1, "Flow darf trotz Sperre nicht verloren gehen");
+    let _ = std::fs::remove_dir_all(dir);
+}
