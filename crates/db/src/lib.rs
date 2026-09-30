@@ -119,7 +119,10 @@ impl Database {
         }
         let conn = schema::open_connection(&config.path)?;
         schema::migrate(&conn)?;
-        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM flows", [], |r| r.get(0))?;
+        // Schätzung über die Zeilen-IDs statt COUNT(*): zwei Indexzugriffe statt eines Scans über viele GB, der das
+        // Öffnen auf langsamen Platten minutenlang blockiert. Lücken entstehen nur, wo Flows außer der ts-Reihenfolge
+        // gelöscht wurden – für die Statusanzeige genau genug.
+        let rows: i64 = conn.query_row("SELECT COALESCE(MAX(id) - MIN(id) + 1, 0) FROM flows", [], |r| r.get(0))?;
         let db = Self::new(&config.path, Some((retention_hours as i64 * HOUR_MS, retention_hours)), config.cleanup_interval);
         db.inner.counters.rows.store(rows, Relaxed);
         Ok(db)
