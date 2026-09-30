@@ -27,6 +27,8 @@ pub struct CollectorConfig {
     pub batch_interval: Duration,
     /// Interne Netze – daraus ergibt sich die Richtung (in/out/intern) jedes Flows.
     pub local_networks: Arc<LocalNetworks>,
+    /// Ausgenommene Netze: Flows, deren Quelle ODER Ziel hier liegt, werden sofort verworfen.
+    pub exclude_networks: Arc<LocalNetworks>,
 }
 
 impl Default for CollectorConfig {
@@ -38,6 +40,7 @@ impl Default for CollectorConfig {
             batch_size: 2048,
             batch_interval: Duration::from_millis(100),
             local_networks: Arc::new(LocalNetworks::default()),
+            exclude_networks: Arc::new(LocalNetworks::none()),
         }
     }
 }
@@ -96,6 +99,23 @@ fn bind_socket(config: &CollectorConfig, reuse_port: bool) -> std::io::Result<Ud
     UdpSocket::from_std(socket.into())
 }
 
+/// Flows ab Index `from` entfernen, deren Quelle oder Ziel in einem ausgenommenen Netz liegt. Rückgabe: Anzahl entfernt.
+fn drop_excluded(batch: &mut FlowBatch, from: usize, excluded: &LocalNetworks) -> usize {
+    if excluded.is_empty() {
+        return 0;
+    }
+    let before = batch.len();
+    let mut kept = from;
+    for i in from..before {
+        if !excluded.contains(batch[i].src_ip) && !excluded.contains(batch[i].dst_ip) {
+            batch.swap(kept, i);
+            kept += 1;
+        }
+    }
+    batch.truncate(kept);
+    before - kept
+}
+
 struct Worker {
     id: usize,
     socket: UdpSocket,
@@ -137,10 +157,14 @@ impl Worker {
                             tracing::debug!(worker = self.id, %from, %err, "Paket verworfen");
                         }
                     }
+                    self.metrics.flows.fetch_add((batch.len() - before) as u64, Relaxed);
+                    let excluded = drop_excluded(&mut batch, before, &self.config.exclude_networks);
+                    if excluded > 0 {
+                        self.metrics.excluded_flows.fetch_add(excluded as u64, Relaxed);
+                    }
                     for flow in &mut batch[before..] {
                         flow.direction = self.config.local_networks.classify(flow.src_ip, flow.dst_ip);
                     }
-                    self.metrics.flows.fetch_add((batch.len() - before) as u64, Relaxed);
                     if batch.len() >= self.config.batch_size {
                         self.flush(&mut batch);
                     }
@@ -172,5 +196,47 @@ impl Worker {
                 self.metrics.dropped_flows.fetch_add(shared.len() as u64, Relaxed);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use model::Direction;
+
+    fn flow(src: &str, dst: &str) -> FlowRecord {
+        FlowRecord {
+            ts_ms: 0,
+            start_ms: 0,
+            src_ip: src.parse().unwrap(),
+            dst_ip: dst.parse().unwrap(),
+            src_port: 1,
+            dst_port: 2,
+            proto: 6,
+            bytes: 1,
+            packets: 1,
+            tcp_flags: 0,
+            in_if: 0,
+            out_if: 0,
+            exporter: "192.0.2.1".parse().unwrap(),
+            direction: Direction::External,
+        }
+    }
+
+    #[test]
+    fn excluded_networks_match_source_or_destination_and_only_new_flows() {
+        let excluded = LocalNetworks::parse(&["10.9.0.0/16", "2001:db8:9::/48"]).unwrap();
+        let mut batch = vec![
+            flow("10.9.1.1", "1.1.1.1"), // schon im Batch, vor `from` – bleibt unangetastet
+            flow("10.0.0.1", "1.1.1.1"),
+            flow("10.9.1.1", "1.1.1.1"),
+            flow("8.8.8.8", "10.9.200.3"),
+            flow("2001:db8:9::5", "2001:db8:1::1"),
+            flow("10.0.0.2", "9.9.9.9"),
+        ];
+        assert_eq!(drop_excluded(&mut batch, 1, &excluded), 3);
+        let src: Vec<String> = batch.iter().map(|f| f.src_ip.to_string()).collect();
+        assert_eq!(src, ["10.9.1.1", "10.0.0.1", "10.0.0.2"]);
+        assert_eq!(drop_excluded(&mut batch, 0, &LocalNetworks::none()), 0);
     }
 }

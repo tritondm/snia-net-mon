@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 use std::net::IpAddr;
 
 fn temp_db(name: &str) -> (Database, PathBuf) {
@@ -404,5 +405,119 @@ async fn bench_statistics_with_and_without_aggregates() {
         time!("sankey", db.sankey(filter.clone()));
         time!("peers", db.peers(FlowFilter { limit: Some(2000), ..filter.clone() }));
     }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn history_config(dir: &Path, max_bytes: u64, retention_days: u64) -> HistoryConfig {
+    HistoryConfig {
+        path: dir.join("history.db"),
+        max_bytes,
+        archive_dir: dir.join("archive"),
+        archive_retention: Duration::from_secs(retention_days * 86_400),
+        compression_level: 3,
+    }
+}
+
+#[tokio::test]
+async fn history_takes_over_flows_in_steps_with_exact_aggregates() {
+    let (live, dir) = temp_db("history-steps");
+    let history = History::open(history_config(&dir, u64::MAX, 90)).unwrap();
+    let now = now_ms();
+    for chunk in mixed_flows(now, 3000).chunks(700) {
+        ingest(&live, chunk.to_vec()).await;
+    }
+    live.set_rollups(false);
+    let mut expected = Vec::new();
+    for filter in test_windows(now) {
+        expected.push(stats_snapshot(&live, &filter).await);
+    }
+
+    // In mehreren Schritten verschieben – auch mitten in einer Stunde, wie es der Retention-Task tut
+    let minute = |ts: i64| ts.div_euclid(MINUTE_MS) * MINUTE_MS;
+    let mut moved = 0;
+    for cutoff in [minute(now - 3 * HOUR_MS - 17 * MINUTE_MS), minute(now - HOUR_MS + 5 * MINUTE_MS), minute(now) + MINUTE_MS] {
+        let path = live.path().to_path_buf();
+        let h = history.clone();
+        moved += tokio::task::spawn_blocking(move || h.absorb(&path, cutoff)).await.unwrap().unwrap();
+        live.cleanup_before(cutoff).await.unwrap();
+        // Wiederholung (z. B. nach Absturz zwischen Kopieren und Löschen) kopiert nichts doppelt
+        let path = live.path().to_path_buf();
+        let h = history.clone();
+        assert_eq!(tokio::task::spawn_blocking(move || h.absorb(&path, cutoff)).await.unwrap().unwrap(), 0);
+    }
+    assert_eq!(moved, 3000);
+    assert!(live.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().is_empty());
+
+    let stored = history.current().unwrap();
+    assert_eq!(stored.query_flows(FlowFilter { from: Some(0), limit: Some(5000), ..Default::default() }).await.unwrap().len(), 3000);
+    for (filter, expected) in test_windows(now).into_iter().zip(expected) {
+        stored.set_rollups(true);
+        assert_eq!(stats_snapshot(&stored, &filter).await, expected, "Aggregate der Historie weichen ab für {filter:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn history_rotates_into_compressed_archive_that_can_be_opened_and_expires() {
+    let dir = std::env::temp_dir().join(format!("snm-test-archive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let live = Database::open(&DbConfig { path: dir.join("flows.db"), retention_hours: 48, cleanup_interval: Duration::from_secs(60) }).unwrap();
+    // max_bytes = 1: jede nicht leere Historie wird bei der Wartung rotiert
+    let history = History::open(history_config(&dir, 1, 90)).unwrap();
+    let now = now_ms();
+    ingest(
+        &live,
+        vec![
+            flow(now - 60 * HOUR_MS, "10.0.0.1", "1.1.1.1", 443, 100),
+            flow(now - 49 * HOUR_MS, "10.0.0.2", "1.1.1.1", 443, 200),
+            flow(now - HOUR_MS, "10.0.0.3", "1.1.1.1", 443, 300), // bleibt live
+        ],
+    )
+    .await;
+    assert_eq!(live.move_to_history(&history).await.unwrap(), 2);
+    assert_eq!(live.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().len(), 1);
+    assert_eq!(history.current().unwrap().query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().len(), 2);
+
+    history.maintain().await;
+    let mut archives = Vec::new();
+    for _ in 0..200 {
+        archives = history.archives().unwrap();
+        if !archives.is_empty() && !history.status().await.unwrap().compressing {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(archives.len(), 1, "kein Archiv angelegt");
+    let archive = &archives[0];
+    assert_eq!(archive.state, "packed");
+    assert_eq!(archive.from_ms, (now - 60 * HOUR_MS) / 1000 * 1000);
+    assert!(!dir.join("history.db.rotating").exists());
+    // Die neue Historie ist leer und setzt an der alten Grenze fort
+    assert!(history.current().unwrap().query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().is_empty());
+    assert_eq!(live.move_to_history(&history).await.unwrap(), 0);
+
+    assert!(matches!(history.archive(&archive.name), Err(DbError::Unavailable(_))));
+    assert!(history.open_archive("../history.db").is_err());
+    history.open_archive(&archive.name).unwrap();
+    let mut opened = None;
+    for _ in 0..200 {
+        if let Ok(db) = history.archive(&archive.name) {
+            opened = Some(db);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let opened = opened.expect("Archiv wurde nicht entpackt");
+    let rows = opened.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap();
+    assert_eq!(rows.iter().map(|r| r.bytes).sum::<i64>(), 300);
+    assert_eq!(history.archives().unwrap()[0].state, "ready");
+    drop(opened);
+
+    // Abgelaufen: Aufbewahrung 0 Tage
+    drop(history);
+    let history = History::open(history_config(&dir, u64::MAX, 0)).unwrap();
+    history.maintain().await;
+    assert!(history.archives().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }

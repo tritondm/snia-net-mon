@@ -2,7 +2,9 @@
 
 Netzwerkmonitor für eine **pfSense-Firewall**. Er sammelt Verbindungsdaten per **NetFlow v9 / IPFIX**, zeigt sie live im Browser – mit
 **GeoIP (Land, ASN)** für jede externe Gegenstelle – und macht sie durchsuchbar. Dazu kommt eine **PCAP-Analyse** für
-Mitschnitte (pcap/pcapng). Alle Daten werden nach spätestens **72 Stunden automatisch und unwiderruflich gelöscht**.
+Mitschnitte (pcap/pcapng). Die Live-Datenbank hält die letzten **48 Stunden**. Ältere Flows wandern in eine
+**Historie**, die ab 50 GB in ein **zstd-Archiv** rotiert wird. Archive bleiben **3 Monate** und lassen sich in der Web-UI
+wieder ansehen. Große Uploads (> 1 GiB in einer Verbindung) melden sich **per Mail bei den Admins**.
 
 - **Backend:** Rust (Tokio, Axum), SQLite im WAL-Modus
 - **Frontend:** Svelte 5 + Tailwind, Catppuccin-Mocha-Theme im Hyprland-Look (Frosted Glass, Verlaufskanten, Monospace)
@@ -17,10 +19,13 @@ Mitschnitte (pcap/pcapng). Alle Daten werden nach spätestens **72 Stunden autom
 | **Dashboard** (`#dashboard`) | Live-Durchsatz getrennt nach **Download ↓ und Upload ↑** (gespiegelter Chart) per WebSocket, Verkehrsrichtung im Zeitfenster, Tabelle der aktiven Verbindungen mit Richtung (einfrierbar, filterbar). **Bereich im Durchsatz-Chart mit der Maus markieren** hält Chart und Tabelle an und zeigt die Verbindungen genau dieses Zeitraums (Klick oder Esc = zurück zu live), Top Talker, Top Ports, **Länder und Netze (ASN)** der Gegenstellen, Protokollverteilung, Sankey-Diagramm Quelle → Dienst → Ziel. Alle Statistiken lassen sich nach Richtung filtern |
 | **Flow-Suche** (`#flows`) | Filter nach IP **oder CIDR** (Quelle/Ziel/beides), Port, Protokoll, Richtung, Zeitfenster; CSV-Export. Darunter die **Top Talker grafisch** mit ihren stärksten Gegenstellen (Dienst, gesendet/empfangen). Klick auf eine IP im Dashboard springt direkt hierher |
 | **PCAP** (`#pcap`) | Capture-Datei (pcap/pcapng, z. B. aus *Diagnostics → Packet Capture*) per Drag & Drop hochladen: Kennzahlen, Zeitverlauf, Protokolle, **Anwendungen** (YouTube, Microsoft 365, CDN, AI … über TLS-SNI, DNS, HTTP-Host, IP-Präfixe), **Endpunkte mit Land und ASN**, Länder, Top Quellen/Ports/Flows, DNS, HTTP, TCP-Flags und heuristische **Auffälligkeiten** (Portscan, NXDOMAIN-Häufung, DNS/HTTP auf Nicht-Standard-Ports). Verlauf der Analysen; Klick auf eine IP sucht sie in den NetFlow-Daten |
+| **Archiv** (`#archive`) | Füllstand der Historie, Liste der Archive mit Zeitraum, Größe und Löschdatum. **Historie oder ein Archiv durchsuchen**: öffnet die Flow-Suche mit dieser Datenquelle (Archive werden dafür im Hintergrund entpackt) |
 | **GeoIP** | Land, Organisation und ASN für alle öffentlichen IPs – in der Live-Tabelle, Flow-Suche (auch CSV), Top Talker, Sankey und PCAP-Analyse |
-| **Retention** | harte Obergrenze 72 h für Flows und PCAP-Analysen (die hochgeladene Datei selbst wird direkt nach der Analyse gelöscht); Abfragen liefern nie ältere Daten, auch bevor der Cleanup gelaufen ist |
+| **Aufbewahrung** | live 48 h (höchstens 72 h) → Historie bis 50 GB → zstd-Archiv, gelöscht 90 Tage nach dem jüngsten Flow; siehe [Aufbewahrung](#aufbewahrung-live--historie--archiv). PCAP-Analysen folgen dem Live-Fenster, die hochgeladene Datei selbst wird direkt nach der Analyse gelöscht |
+| **Ausgenommene Netze** | `network.exclude_networks`: Verkehr von oder zu diesen Netzen wird beim Empfang verworfen – nicht gespeichert, nicht angezeigt, nicht gezählt |
+| **Upload-Alarm** | lädt eine Verbindung mehr als 1 GiB nach extern hoch, geht eine Mail an die Admins (Quelle, Ziel mit Land/ASN, Dienst, Menge, Dauer, Rate) |
 
-Tastatur wie in Hyprland: **Alt+1 / Alt+2 / Alt+3** wechselt den Workspace. Der Fokus folgt der Maus: Das Fenster unter dem Zeiger
+Tastatur wie in Hyprland: **Alt+1 … Alt+4** wechselt den Workspace. Der Fokus folgt der Maus: Das Fenster unter dem Zeiger
 bekommt die aktive Verlaufskante.
 
 ## Schnellstart (Demo ohne pfSense)
@@ -97,7 +102,15 @@ und nicht der zufällige Client-Port.
 Standardmäßig gelten die privaten Bereiche (RFC 1918, CGNAT, Link-Local, IPv6-ULA) als intern. Mit **öffentlichem IPv6** vom
 Provider muss dessen Präfix in `local_networks` ergänzt werden, sonst läuft IPv6-Verkehr unter „extern“. Dasselbe gilt für die
 WAN-Adresse, wenn Verbindungen zur Firewall selbst als Download zählen sollen. Die Richtung wird beim Empfang gespeichert. Eine
-geänderte Liste wirkt daher nur auf neue Flows, alte sind nach spätestens 72 h ohnehin gelöscht.
+geänderte Liste wirkt daher nur auf neue Flows.
+
+### Ausgenommene Netze
+
+Netze in `network.exclude_networks` (CIDR oder einzelne IP) werden vom Collector direkt nach dem Parsen verworfen, sobald
+**Quelle oder Ziel** darin liegt. Sie landen weder in der Datenbank noch in der Live-Ansicht und zählen nicht für den
+Upload-Alarm. Typisch: ein Backup-Server, dessen nächtliche Uploads keinen Alarm auslösen sollen, oder ein Gäste-WLAN. Der
+Zähler `collector.excluded_flows` unter `/api/status` zeigt, wie viel verworfen wurde. Bereits gespeicherte Flows bleiben
+unverändert.
 
 ## Konfiguration
 
@@ -110,7 +123,19 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `network.local_networks` | private Bereiche | interne Netze für Download/Upload-Erkennung (siehe oben) |
 | `collector.listen` | `0.0.0.0:2055` | Empfang von NetFlow/IPFIX |
 | `collector.workers` | `2` | parallele Empfangs-Sockets (`SO_REUSEPORT`) |
-| `storage.retention_hours` | `72` | Aufbewahrung; Werte über 72 werden auf 72 begrenzt |
+| `network.exclude_networks` | leer | Netze, deren Verkehr komplett ignoriert wird (siehe oben) |
+| `storage.retention_hours` | `48` | Live-Fenster; Werte über 72 werden auf 72 begrenzt |
+| `history.enabled` | `true` | Flows nach dem Live-Fenster in die Historie übernehmen (`false` = löschen) |
+| `history.max_size_gb` | `50` | ab dieser Größe wird die Historie ins Archiv rotiert |
+| `history.archive_dir` | `data/archive` | Ablage der Archive (`flows_<von>_<bis>.db.zst`, UTC) |
+| `history.archive_retention_days` | `90` | Archive werden so lange nach ihrem jüngsten Flow aufbewahrt |
+| `history.compression_level` | `19` | zstd-Stufe 1–22 |
+| `alerts.upload_threshold_mb` | `1024` | Upload-Alarm ab dieser Menge je Verbindung, `0` = aus |
+| `alerts.session_idle_secs` | `600` | ohne neue Flows so lange gilt eine Verbindung als beendet |
+| `alerts.max_mails_per_hour` | `20` | Obergrenze gegen Mail-Fluten |
+| `email.smtp_host` / `smtp_port` / `security` | leer / `587` / `starttls` | SMTP-Server; `security` = `starttls`, `tls` (465) oder `none` (nur Relay im LAN). Leerer Host = kein Mailversand |
+| `email.username` / `email.password` | leer | SMTP-Anmeldung; Passwort alternativ per `SNIA_SMTP_PASSWORD` |
+| `email.from` / `email.admins` | – | Absender und Empfänger der Alarm-Mails |
 | `geoip.country_db` / `geoip.asn_db` | `data/GeoLite2-*.mmdb` | MaxMind-Datenbanken (siehe oben) |
 | `geoip.account_id` / `geoip.license_key` | leer | Zugang für das automatische Update (oder `MAXMIND_ACCOUNT_ID` / `MAXMIND_LICENSE_KEY`) |
 | `geoip.update_interval_hours` | `24` | wie oft nach einer neuen GeoLite2-Ausgabe gesucht wird |
@@ -118,15 +143,17 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `pcap.app_rules` | leer | eigene App-Regeln als JSON (Format wie `crates/pcap/apps.json`), leer = mitgelieferte Regeln |
 
 Aufruf mit anderer Datei: `snia-net-mon /etc/snia-net-mon.toml`. Logging über `RUST_LOG`, z. B. `RUST_LOG=debug`.
+Mailversand prüfen: `snia-net-mon --test-mail [config.toml]` schickt eine Test-Mail an die Admins und beendet sich.
 
 ## Architektur
 
 ```text
-pfSense (softflowd) ──UDP 2055──▶ collector ──Batches──┬──▶ db: Writer-Thread ──▶ SQLite (WAL)
-                                  (n Worker,            │        Retention-Task ──▶ DELETE > 72 h, secure_delete
-                                   SO_REUSEPORT)        └──▶ api::LiveHub ──1×/s──▶ WebSocket ──▶ Browser
-Browser ──REST──▶ api (Axum) ──▶ db (Abfragen, Lese-Pool) ──▶ geo (Land/ASN je IP, beim Ausliefern)
-Browser ──PCAP-Upload──▶ api ──▶ pcap (Analyse im Blocking-Thread) ──▶ db (Ergebnis als JSON, 72 h)
+pfSense (softflowd) ──UDP 2055──▶ collector ──Batches──┬──▶ db: Writer-Thread ──▶ flows.db (live, 48 h)
+                                  (n Worker,            │        Retention-Task ──▶ history.db ──50 GB──▶ archive/*.db.zst
+                                   SO_REUSEPORT,        ├──▶ api::LiveHub ──1×/s──▶ WebSocket ──▶ Browser
+                                   exclude_networks)    └──▶ alert: Upload je Verbindung > 1 GiB ──SMTP──▶ Admins
+Browser ──REST──▶ api (Axum) ──▶ db (live, Historie oder entpacktes Archiv) ──▶ geo (Land/ASN je IP, beim Ausliefern)
+Browser ──PCAP-Upload──▶ api ──▶ pcap (Analyse im Blocking-Thread) ──▶ db (Ergebnis als JSON, 48 h)
 ```
 
 ```text
@@ -141,7 +168,8 @@ Snia-Net-Mon/
 │   │   ├── metrics.rs         lock-freie Zähler
 │   │   └── synth.rs           Encoder + Verkehrsmodell (Tests, flowgen)
 │   ├── db/
-│   │   ├── lib.rs             Writer-Thread, Lese-Pool, Retention-Task
+│   │   ├── lib.rs             Writer-Thread, Lese-Pool, Retention-Task (verschieben oder löschen)
+│   │   ├── history.rs         Historie, Rotation, zstd-Archive, Entpacken zum Ansehen
 │   │   ├── schema.rs          Tabellen, Indizes, Pragmas, Migrationen
 │   │   ├── rollup.rs          Minuten-/Stunden-Aggregate, Zerlegung der Zeitfenster
 │   │   ├── query.rs           Suche, Top Talker/Ports/Protokolle, Verbindungen, Gegenstellen, Zeitreihe, Sankey
@@ -157,14 +185,17 @@ Snia-Net-Mon/
 │   │   ├── lib.rs             Axum-Router, Endpunkte, Geo-Anreicherung, Token-Prüfung, Auslieferung der SPA
 │   │   ├── pcap.rs            Upload (gestreamt, größenbegrenzt), Verlauf
 │   │   └── live.rs            Tabelle aktiver Verbindungen, 1-s-Snapshots per Broadcast
-│   ├── server/                Binary snia-net-mon: Konfiguration + Verdrahtung, geordnetes Herunterfahren
+│   ├── alert/
+│   │   ├── upload.rs          Upload-Summen je Verbindung, Alarm einmal pro Verbindung, Mail-Text
+│   │   └── mail.rs            SMTP-Versand (lettre, rustls)
+│   ├── server/                Binary snia-net-mon: Konfiguration + Verdrahtung, --test-mail, geordnetes Herunterfahren
 │   └── flowgen/               Binary flowgen: Demo-/Lastgenerator
 └── frontend/
     ├── tailwind.config.js     Catppuccin-Mocha-Palette, Glow, Verlaufskante, Animationen
     └── src/
         ├── app.css            Komponenten-Klassen: .window, .window-active, .chip, .btn, .table-flows …
         ├── lib/               API-Client, WebSocket-Store (Runes), Formatierung, UI-Zustand
-        └── components/        Dashboard, BandwidthChart, LiveTable, SankeyChart, FlowSearch, TalkerConnections, PcapAnalyzer, GeoTag …
+        └── components/        Dashboard, BandwidthChart, LiveTable, SankeyChart, FlowSearch, TalkerConnections, PcapAnalyzer, ArchiveBrowser, GeoTag …
 ```
 
 ### Leistung bei hoher Paketrate
@@ -196,7 +227,7 @@ Einzel-Flows. Das Ergebnis ist **exakt dasselbe** wie über die Rohdaten (per Te
   über die Rohdaten gesucht. Dafür gibt es Indizes, diese Abfragen betreffen nur einen kleinen Ausschnitt.
 - Eine bestehende Datenbank bekommt die Aggregate beim ersten Start einmalig nachberechnet (Log: „Aggregat-Tabellen
   angelegt“). Bei einer großen Datei kann das einige Minuten dauern.
-- Die Aggregate unterliegen derselben 72-h-Retention wie die Flows.
+- Die Aggregate wandern mit den Flows in Historie und Archiv, Statistiken dort sind genauso schnell.
 
 Lastprobe mit 1 h bei 1.000 Flows/s (3,6 Mio. Flows, 60 Geräte, 20.000 Gegenstellen), Zeitfenster 1 h, Release-Build:
 
@@ -212,18 +243,50 @@ wiederkehren: bei diesen Testdaten mit sehr vielen einmaligen Gegenstellen rund 
 immer denselben Diensten deutlich weniger. Nachmessen: `cargo test -p db --release -- --ignored bench --nocapture`
 (Anzahl per `BENCH_FLOWS`).
 
-### Retention (72 Stunden)
+### Aufbewahrung (live → Historie → Archiv)
 
-- `model::MAX_RETENTION_HOURS = 72` ist fest einkompiliert. Die Konfiguration kann den Wert nur verkleinern.
-- Der Retention-Task läuft beim Start und danach jede Minute. Er löscht in Blöcken zu je 20.000 Zeilen
-  (`DELETE … WHERE ts < now − 72 h`), damit der Writer nicht blockiert.
-- **Unwiderruflich:** `PRAGMA secure_delete = ON` überschreibt gelöschte Inhalte in der Datei. Danach folgt
-  `wal_checkpoint(TRUNCATE)`, damit nichts im WAL zurückbleibt, und `incremental_vacuum` gibt freie Seiten zurück.
-- Jede Abfrage begrenzt das Zeitfenster zusätzlich auf die letzten 72 h. So erscheinen alte Daten auch zwischen zwei
-  Cleanup-Läufen nie.
-- PCAP-Analysen (sie enthalten IPs, Domains und URLs) werden nach derselben Frist gelöscht. Hochgeladene Capture-Dateien
-  liegen nur während der Analyse als temporäre Datei in `pcap.upload_dir` und werden danach sofort entfernt – auch bei
-  Fehlern; Reste nach einem Absturz räumt der nächste Start weg.
+```text
+flows.db (live, 48 h) ──jede Minute──▶ history.db ──ab 50 GB──▶ archive/flows_<von>_<bis>.db.zst ──90 Tage──▶ gelöscht
+```
+
+- **Live:** höchstens 72 h (`model::MAX_RETENTION_HOURS`, fest einkompiliert), Standard 48 h. Dashboard und Live-Ansicht
+  arbeiten nur hier.
+- **Verschieben:** Der Retention-Task läuft beim Start und danach jede Minute. Er kopiert alle Flows vor der
+  minutengenauen Grenze samt Minuten-Aggregaten in `history.db` (in Schritten zu 10 Minuten) und berechnet dort die
+  Stunden-Aggregate neu. Erst danach löscht er sie in der Live-Datenbank (`secure_delete`, `wal_checkpoint(TRUNCATE)`,
+  `incremental_vacuum`). Die erreichte Grenze steht in derselben Transaktion in `meta.moved_until` der Historie: Bricht
+  der Prozess dazwischen ab, wird nichts doppelt kopiert. Scheitert das Kopieren (z. B. Platte voll), löscht der Task
+  trotzdem alles über 72 h – die Live-Datenbank wächst nie unbegrenzt.
+- **Rotation:** Erreicht die Historie `max_size_gb` (Datei + WAL), wird sie geschlossen, in `history.db.rotating`
+  umbenannt und durch eine leere ersetzt. Ein eigener Thread komprimiert sie mit **zstd** (Stufe 19, Long-Distance-
+  Matching, halbe Kernzahl als Threads) nach `archive_dir`. Flow-Datenbanken schrumpfen dabei typischerweise auf ein
+  Sechstel (Testdaten: 13,6 MB → 2,1 MB). Bricht der Prozess ab, setzt der nächste Start die Komprimierung fort.
+- **Archive:** Dateiname = Zeitraum (UTC) des ältesten und jüngsten Flows. Gelöscht wird `archive_retention_days` nach
+  dem jüngsten Flow.
+- **Ansehen:** Im Workspace **archiv** ein Archiv öffnen: Es wird nach `archive_dir/.view/` entpackt (braucht so viel
+  Platz wie die ursprüngliche Historie, bei 50 GB also 50 GB und einige Minuten). Danach lässt es sich in der Flow-Suche
+  wie die Live-Daten durchsuchen, inklusive Top Talker und CSV-Export. Es ist immer nur ein Archiv entpackt; nach 30 Minuten
+  ohne Abfrage wird es wieder gelöscht.
+- **Ohne Historie** (`history.enabled = false`) gilt das bisherige Verhalten: Flows werden nach dem Live-Fenster
+  unwiderruflich gelöscht.
+- PCAP-Analysen (sie enthalten IPs, Domains und URLs) werden nach dem Live-Fenster gelöscht und nicht archiviert.
+  Hochgeladene Capture-Dateien liegen nur während der Analyse als temporäre Datei in `pcap.upload_dir` und werden danach
+  sofort entfernt – auch bei Fehlern; Reste nach einem Absturz räumt der nächste Start weg.
+
+**Datenschutz:** Verbindungsdaten sind personenbezogen. Mit Historie und Archiv werden sie bis zu drei Monate (plus die
+Zeit bis zur Rotation) aufbewahrt – das sollte zur internen Richtlinie bzw. Betriebsvereinbarung passen. Kleine Netze
+erreichen 50 GB eventuell nie; dann bleibt die Historie so lange liegen, bis sie voll ist. `max_size_gb` entsprechend
+wählen.
+
+### Upload-Alarm
+
+softflowd meldet eine lange Verbindung mehrfach (je `maxlife`). Der Alarm summiert deshalb die ausgehenden Bytes
+(Richtung `out`) je **Verbindung** (Quelle, Ziel, Ports, Protokoll) über alle ihre Flows. Beim Überschreiten von
+`upload_threshold_mb` geht **eine** Mail an `email.admins` mit Quelle, Ziel (Land, ASN), Dienst, Menge, Beginn, Dauer und
+Rate. Die Verbindung wird danach nicht erneut gemeldet. Ohne neue Flows seit `session_idle_secs` gilt sie als beendet.
+Ein Upload, der auf viele parallele Verbindungen verteilt ist (manche Cloud-Clients), löst den Alarm nur aus, wenn eine
+einzelne Verbindung die Schwelle erreicht. Jeder Alarm steht zusätzlich im Log (`WARN alert::upload`), auch ohne
+Mailversand oder wenn `max_mails_per_hour` erreicht ist.
 
 ### Sicherheit
 
@@ -234,8 +297,8 @@ immer denselben Diensten deutlich weniger. Nachmessen: `cargo test -p db --relea
 
 | Methode | Pfad | Beschreibung |
 |---|---|---|
-| GET | `/api/status` | Collector-Zähler, DB-Statistik, Retention, GeoIP-Status |
-| GET | `/api/flows` | Flow-Suche (mit `src_geo`/`dst_geo`). Parameter: `from`, `to` (Unix-ms), `ip`, `src`, `dst` (IP/CIDR), `port`, `proto`, `dir` (`in`/`out`/`internal`/`external`), `limit` (≤ 5000) |
+| GET | `/api/status` | Collector-Zähler (inkl. `excluded_flows`), DB-Statistik, Live-Fenster, Historie, GeoIP-Status |
+| GET | `/api/flows` | Flow-Suche (mit `src_geo`/`dst_geo`). Parameter: `source` (`live` Standard, `history`, `archive:<name>` – gilt für alle `/flows`- und `/stats`-Endpunkte), `from`, `to` (Unix-ms), `ip`, `src`, `dst` (IP/CIDR), `port`, `proto`, `dir` (`in`/`out`/`internal`/`external`), `limit` (≤ 5000) |
 | GET | `/api/stats/talkers` · `/ports` · `/protocols` | Aggregationen, gleiche Filterparameter |
 | GET | `/api/stats/directions` | Bytes, Pakete, Flows und ø Bandbreite je Richtung |
 | GET | `/api/stats/timeseries` | Zeitreihe mit `bytes_in`/`bytes_out` je Stützstelle, zusätzlich `points` |
@@ -244,6 +307,8 @@ immer denselben Diensten deutlich weniger. Nachmessen: `cargo test -p db --relea
 | GET | `/api/stats/geo` | Verkehr externer Gegenstellen nach Land (`countries`) und ASN (`asns`), `limit` ≤ 50 |
 | GET | `/api/stats/sankey` | Knoten/Kanten Quelle → Dienst → Ziel, `limit` = Anzahl Verbindungen |
 | WS | `/api/live` | beim Verbinden `{"type":"history"}`, danach jede Sekunde `{"type":"tick"}` mit Rate (gesamt, `bytes_in`, `bytes_out`), aktiven Verbindungen inkl. Richtung, Zählern und GeoIP |
+| GET | `/api/archives` | Historie (Größe, Zeitraum, `compressing`) und Archive mit `state` (`packed`, `unpacking`, `ready`, `failed`) |
+| POST | `/api/archives/{name}/open` | Archiv im Hintergrund entpacken, danach mit `source=archive:{name}` abfragbar |
 | POST | `/api/pcap?name=datei.pcap` | Capture-Datei als Rohdaten im Body (`curl --data-binary @datei.pcap`), liefert das Analyse-Ergebnis mit `id` |
 | GET | `/api/pcap` · `/api/pcap/{id}` | Verlauf der Analysen / gespeichertes Ergebnis |
 | DELETE | `/api/pcap/{id}` | Analyse löschen |
@@ -251,7 +316,7 @@ immer denselben Diensten deutlich weniger. Nachmessen: `cargo test -p db --relea
 ## Entwicklung
 
 ```bash
-cargo test --workspace              # Parser-Roundtrips (v9/IPFIX), Fuzz-artige Robustheit, Retention, Filter, PCAP/pcapng-Leser, App-Regeln, GeoIP
+cargo test --workspace              # Parser-Roundtrips (v9/IPFIX), Fuzz-artige Robustheit, Retention, Historie/Archiv, Upload-Alarm, Filter, PCAP/pcapng-Leser, App-Regeln, GeoIP
 cargo clippy --workspace --all-targets
 cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (:8080), Hot Reload
 ```
@@ -259,9 +324,10 @@ cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (
 ## Grenzen & nächste Schritte
 
 - **Skalierung:** Mit den Aggregaten bleiben die Statistiken auch bei ~1.000 Flows/s schnell. Grenze ist dann eher der
-  Platz: 72 h Rohdaten bei 1.000 Flows/s sind ~50 GB. Nächste Schritte wären eine kürzere Aufbewahrung nur für die
-  Einzel-Flows (Aggregate weiter 72 h) oder für sehr hohe Raten DuckDB/ClickHouse. Die Schnittstelle des `db`-Crates ist
-  dafür ausgelegt.
+  Platz: 48 h Rohdaten bei 1.000 Flows/s sind ~33 GB, die Historie füllt 50 GB dann in gut drei Tagen. Für sehr hohe
+  Raten wären DuckDB/ClickHouse der nächste Schritt; die Schnittstelle des `db`-Crates ist dafür ausgelegt.
+- **Archive ansehen** braucht so viel freien Platz wie die entpackte Historie und dauert bei 50 GB einige Minuten.
+  Kleinere `max_size_gb` ergeben kleinere, schneller geöffnete Archive.
 - **Partitionierung:** Jeder Datensatz trägt seinen Stunden-Bucket, gelöscht wird über den Zeitindex. Echte Stunden-Tabellen
   mit `DROP TABLE` wären bei sehr großen Datenmengen schneller.
 - **NetFlow v5 / sFlow** werden nicht unterstützt, softflowd kann v9/IPFIX.

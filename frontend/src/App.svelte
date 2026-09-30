@@ -3,15 +3,17 @@
   import Dashboard from './components/Dashboard.svelte';
   import FlowSearch from './components/FlowSearch.svelte';
   import PcapAnalyzer from './components/PcapAnalyzer.svelte';
+  import ArchiveBrowser from './components/ArchiveBrowser.svelte';
   import TokenDialog from './components/TokenDialog.svelte';
   import { ui } from './lib/state.svelte.js';
   import { live } from './lib/live.svelte.js';
   import { api } from './lib/api.js';
+  import { fmtBytes } from './lib/format.js';
 
   let status = $state(null);
 
-  // Workspace in der URL (#dashboard, #flows, #pcap) – Links und Zurück-Taste funktionieren
-  const WORKSPACES = ['dashboard', 'flows', 'pcap'];
+  // Workspace in der URL (#dashboard, #flows, #pcap, #archive) – Links und Zurück-Taste funktionieren
+  const WORKSPACES = ['dashboard', 'flows', 'pcap', 'archive'];
   const fromHash = () => {
     const key = location.hash.slice(1);
     if (WORKSPACES.includes(key)) ui.workspace = key;
@@ -29,7 +31,7 @@
     return () => clearInterval(id);
   });
 
-  // Tastenkürzel wie in Hyprland: Alt+1/2/3 wechselt den Workspace
+  // Tastenkürzel wie in Hyprland: Alt+1…4 wechselt den Workspace
   function onKey(event) {
     if (!event.altKey) return;
     const target = WORKSPACES[Number(event.key) - 1];
@@ -49,12 +51,15 @@
       <Dashboard />
     {:else if ui.workspace === 'flows'}
       <FlowSearch />
-    {:else}
+    {:else if ui.workspace === 'pcap'}
       <PcapAnalyzer />
+    {:else}
+      <ArchiveBrowser {status} />
     {/if}
   </main>
   <footer class="px-4 pb-2 text-[10px] text-ctp-overlay0">
-    daten werden nach {status?.retention_hours ?? 72} h automatisch gelöscht · geoip {status?.geoip ?? '–'}{#if status?.geoip_built_ms}
+    live {status?.retention_hours ?? 48} h · {#if status?.history}danach historie bis {fmtBytes(status.history.max_bytes)}, archive {status.history.archive_retention_days}
+      tage{:else}danach automatisch gelöscht{/if} · geoip {status?.geoip ?? '–'}{#if status?.geoip_built_ms}
       · stand {new Date(status.geoip_built_ms).toLocaleDateString('de-AT')}{/if} (maxmind geolite2) · catppuccin mocha
   </footer>
 </div>

@@ -5,18 +5,22 @@
 //!   (natürliches Batching: je höher die Last, desto größer die Transaktionen).
 //! * **Partitionierung:** jeder Datensatz trägt seinen Stunden-Bucket (`bucket = ts / 1h`), Abfragen und Löschungen
 //!   laufen über den Zeitindex.
-//! * **Retention:** höchstens 72 Stunden ([`model::MAX_RETENTION_HOURS`]). Ein Hintergrund-Task löscht ältere Datensätze
-//!   in Blöcken. `secure_delete` überschreibt gelöschte Inhalte in der Datei, danach werden WAL (Checkpoint + Truncate)
-//!   und freie Seiten (`incremental_vacuum`) bereinigt – die Daten sind damit auch forensisch nicht mehr in der Datei.
-//!   Zusätzlich liefert keine Abfrage jemals Daten, die älter als das Retention-Fenster sind.
+//! * **Retention:** die Live-Datenbank hält höchstens 72 Stunden ([`model::MAX_RETENTION_HOURS`]), Standard 48. Ein
+//!   Hintergrund-Task entfernt ältere Datensätze in Blöcken – mit aktivierter [`History`] werden sie vorher in die
+//!   Historien-Datenbank verschoben. `secure_delete` überschreibt gelöschte Inhalte in der Datei, danach werden WAL
+//!   (Checkpoint + Truncate) und freie Seiten (`incremental_vacuum`) bereinigt. Zusätzlich liefert keine Abfrage auf
+//!   die Live-Datenbank Daten, die älter als das Retention-Fenster sind.
+//! * **Historie und Archiv:** siehe [`history`].
 //! * **Voraggregation:** Summen je Minute und Stunde (siehe [`rollup`]) machen die Dashboard-Statistiken unabhängig von
 //!   der Zahl der Flows schnell; sie unterliegen derselben Retention.
 
+pub mod history;
 mod pcap;
 mod query;
 mod rollup;
 mod schema;
 
+pub use history::{ArchiveInfo, History, HistoryConfig, HistoryStatus};
 pub use pcap::PcapSummary;
 
 pub use query::{
@@ -33,7 +37,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
-use rollup::HOUR_MS;
+use rollup::{HOUR_MS, MINUTE_MS};
 /// Anzahl Zeilen pro Lösch-Transaktion – hält die Sperre auf die Datenbank kurz, damit der Writer nicht blockiert.
 const DELETE_CHUNK: usize = 20_000;
 
@@ -47,6 +51,9 @@ pub enum DbError {
     InvalidFilter(String),
     #[error("E/A: {0}")]
     Io(#[from] std::io::Error),
+    /// Datenquelle gerade nicht abfragbar (Archiv wird entpackt, Historie wird rotiert …)
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -90,8 +97,10 @@ pub struct Database {
 
 struct Inner {
     path: PathBuf,
-    retention_ms: i64,
-    retention_hours: u64,
+    /// `None` = unbegrenzt (Historie, geöffnetes Archiv): keine Retention, Abfragen ohne Untergrenze
+    retention: Option<(i64, u64)>,
+    /// Grenze der letzten Verschiebung in die Historie (Unix-ms, 0 = noch keine). Alles davor liegt in der Historie.
+    moved_until: AtomicI64,
     cleanup_interval: Duration,
     readers: Mutex<Vec<Connection>>,
     counters: Counters,
@@ -111,28 +120,61 @@ impl Database {
         let conn = schema::open_connection(&config.path)?;
         schema::migrate(&conn)?;
         let rows: i64 = conn.query_row("SELECT COUNT(*) FROM flows", [], |r| r.get(0))?;
-        let db = Self {
-            inner: Arc::new(Inner {
-                path: config.path.clone(),
-                retention_ms: retention_hours as i64 * HOUR_MS,
-                retention_hours,
-                cleanup_interval: config.cleanup_interval,
-                readers: Mutex::new(Vec::new()),
-                counters: Counters::default(),
-                rollups: AtomicBool::new(true),
-            }),
-        };
+        let db = Self::new(&config.path, Some((retention_hours as i64 * HOUR_MS, retention_hours)), config.cleanup_interval);
         db.inner.counters.rows.store(rows, Relaxed);
         Ok(db)
     }
 
-    pub fn retention_ms(&self) -> i64 {
-        self.inner.retention_ms
+    /// Unbegrenzten Speicher öffnen (Historie, entpacktes Archiv): gleiches Schema, keine Retention, kein Zeilenzähler
+    /// (ein `COUNT(*)` über viele GB würde das Öffnen minutenlang blockieren).
+    pub fn open_store(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = schema::open_connection(path)?;
+        schema::migrate(&conn)?;
+        schema::create_meta(&conn)?;
+        Ok(Self::new(path, None, Duration::from_secs(60)))
     }
 
-    /// Frühester Zeitpunkt, den Abfragen liefern dürfen.
+    fn new(path: &Path, retention: Option<(i64, u64)>, cleanup_interval: Duration) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                path: path.to_path_buf(),
+                retention,
+                moved_until: AtomicI64::new(0),
+                cleanup_interval,
+                readers: Mutex::new(Vec::new()),
+                counters: Counters::default(),
+                rollups: AtomicBool::new(true),
+            }),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    pub fn retention_ms(&self) -> i64 {
+        self.inner.retention.map_or(i64::MAX, |(ms, _)| ms)
+    }
+
+    /// Nominelle Grenze des Retention-Fensters: jetzt minus Aufbewahrung.
+    fn nominal_floor_ms(&self) -> i64 {
+        match self.inner.retention {
+            Some((ms, _)) => now_ms() - ms,
+            None => i64::MIN,
+        }
+    }
+
+    /// Frühester Zeitpunkt, den Abfragen liefern dürfen. Mit Historie ist das die Grenze der letzten Verschiebung –
+    /// so entsteht zwischen zwei Cleanup-Läufen keine Lücke zwischen Live-Daten und Historie.
     pub fn retention_floor_ms(&self) -> i64 {
-        now_ms() - self.inner.retention_ms
+        let floor = self.nominal_floor_ms();
+        match self.inner.moved_until.load(Relaxed) {
+            0 => floor,
+            moved => floor.min(moved),
+        }
     }
 
     /// Writer-Thread starten. Er läuft, bis alle Sender des Kanals geschlossen sind, und schreibt dann den Rest weg.
@@ -172,24 +214,52 @@ impl Database {
         Ok(handle)
     }
 
-    /// Hintergrund-Task für die Retention: sofort beim Start und danach im Intervall.
-    pub fn spawn_cleanup(&self, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+    /// Hintergrund-Task für die Retention: sofort beim Start und danach im Intervall. Mit `history` werden abgelaufene
+    /// Flows vorher in die Historie verschoben und danach Rotation und Archiv-Aufräumen erledigt.
+    pub fn spawn_cleanup(&self, history: Option<History>, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
         let db = self.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(db.inner.cleanup_interval);
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        match db.cleanup_now().await {
+                        let result = match &history {
+                            Some(history) => db.move_to_history(history).await,
+                            None => db.cleanup_now().await,
+                        };
+                        match result {
                             Ok(0) => {}
+                            Ok(n) if history.is_some() => tracing::info!(moved = n, "Retention: alte Flows in die Historie verschoben"),
                             Ok(n) => tracing::info!(deleted = n, "Retention: alte Flows gelöscht"),
                             Err(err) => tracing::error!(%err, "Retention-Cleanup fehlgeschlagen"),
+                        }
+                        if let Some(history) = &history {
+                            history.maintain().await;
                         }
                     }
                     _ = shutdown.changed() => if *shutdown.borrow() { return },
                 }
             }
         })
+    }
+
+    /// Flows vor der (minutengenauen) Retention-Grenze in die Historie kopieren und danach hier löschen. Scheitert das
+    /// Kopieren, gilt weiter die harte Obergrenze von 72 h: Älteres wird trotzdem gelöscht.
+    pub async fn move_to_history(&self, history: &History) -> Result<usize> {
+        let cutoff = self.nominal_floor_ms().div_euclid(MINUTE_MS) * MINUTE_MS;
+        let (db, h) = (self.clone(), history.clone());
+        match tokio::task::spawn_blocking(move || h.absorb(&db.inner.path, cutoff)).await? {
+            Ok(moved) => {
+                self.cleanup_before(cutoff).await?;
+                self.inner.moved_until.store(cutoff, Relaxed);
+                Ok(moved)
+            }
+            Err(err) => {
+                tracing::error!(%err, "Verschieben in die Historie fehlgeschlagen – Flows älter als 72 h werden gelöscht");
+                self.cleanup_before(now_ms() - MAX_RETENTION_HOURS as i64 * HOUR_MS).await?;
+                Err(err)
+            }
+        }
     }
 
     /// Alle Flows älter als das Retention-Fenster löschen. Rückgabe: Anzahl gelöschter Zeilen.
@@ -238,14 +308,14 @@ impl Database {
 
     pub async fn stats(&self) -> Result<DbStats> {
         let oldest: Option<i64> = self.with_reader(|conn| Ok(conn.query_row("SELECT MIN(ts) FROM flows", [], |r| r.get(0))?)).await?;
-        let file_bytes = file_size(&self.inner.path) + file_size(&wal_path(&self.inner.path));
+        let file_bytes = db_file_size(&self.inner.path);
         let c = &self.inner.counters;
         Ok(DbStats {
             rows: c.rows.load(Relaxed).max(0),
             inserted: c.inserted.load(Relaxed),
             deleted: c.deleted.load(Relaxed),
             oldest_ts_ms: oldest,
-            retention_hours: self.inner.retention_hours,
+            retention_hours: self.inner.retention.map_or(0, |(_, hours)| hours),
             last_cleanup_ms: c.last_cleanup_ms.load(Relaxed),
             file_bytes,
             write_batches: c.write_batches.load(Relaxed),
@@ -313,10 +383,16 @@ fn insert_batches(conn: &mut Connection, batches: &[Arc<Vec<FlowRecord>>]) -> Re
     Ok(count)
 }
 
-fn wal_path(path: &Path) -> PathBuf {
+/// Pfad mit angehängtem Suffix (`flows.db` → `flows.db-wal`)
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut p = path.as_os_str().to_owned();
-    p.push("-wal");
+    p.push(suffix);
     PathBuf::from(p)
+}
+
+/// Größe einer SQLite-Datei samt WAL
+fn db_file_size(path: &Path) -> u64 {
+    file_size(path) + file_size(&with_suffix(path, "-wal"))
 }
 
 fn file_size(path: &Path) -> u64 {

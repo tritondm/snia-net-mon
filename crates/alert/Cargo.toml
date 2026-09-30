@@ -1,0 +1,13 @@
+[package]
+name = "alert"
+description = "Upload-Alarm (große Uploads je Verbindung) und Mailversand an die Admins per SMTP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+model.workspace = true
+geo.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }

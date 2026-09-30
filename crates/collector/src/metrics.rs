@@ -11,6 +11,8 @@ pub struct CollectorMetrics {
     pub missing_template: AtomicU64,
     /// Flows, die verworfen wurden, weil die Datenbank-Pipeline nicht hinterherkam.
     pub dropped_flows: AtomicU64,
+    /// Flows von oder zu einem ausgenommenen Netz (`network.exclude_networks`) – weder gespeichert noch angezeigt.
+    pub excluded_flows: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -21,6 +23,7 @@ pub struct MetricsSnapshot {
     pub parse_errors: u64,
     pub missing_template: u64,
     pub dropped_flows: u64,
+    pub excluded_flows: u64,
 }
 
 impl CollectorMetrics {
@@ -32,6 +35,7 @@ impl CollectorMetrics {
             parse_errors: self.parse_errors.load(Relaxed),
             missing_template: self.missing_template.load(Relaxed),
             dropped_flows: self.dropped_flows.load(Relaxed),
+            excluded_flows: self.excluded_flows.load(Relaxed),
         }
     }
 }

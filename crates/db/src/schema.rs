@@ -41,6 +41,15 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Schlüssel/Wert-Tabelle der Historie (z. B. `moved_until`: bis wohin Flows aus der Live-Datenbank übernommen sind).
+pub(crate) fn create_meta(conn: &Connection) -> rusqlite::Result<()> {
+    create_meta_in(conn, "main")
+}
+
+pub(crate) fn create_meta_in(conn: &Connection, schema: &str) -> rusqlite::Result<()> {
+    conn.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {schema}.meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);"))
+}
+
 fn create(conn: &Connection) -> rusqlite::Result<()> {
     // auto_vacuum muss vor dem Anlegen der ersten Tabelle gesetzt sein (bei bestehenden Dateien wirkungslos)
     conn.execute_batch(

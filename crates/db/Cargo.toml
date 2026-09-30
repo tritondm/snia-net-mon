@@ -1,6 +1,6 @@
 [package]
 name = "db"
-description = "SQLite-Speicher (WAL): Ingestion-Pipeline, Abfragen, 72-Stunden-Retention"
+description = "SQLite-Speicher (WAL): Ingestion-Pipeline, Abfragen, Live-Retention, Historie und zstd-Archiv"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,3 +12,4 @@ tokio.workspace = true
 serde.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+zstd = { version = "0.14", features = ["zstdmt"] }

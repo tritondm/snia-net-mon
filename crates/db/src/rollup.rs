@@ -199,6 +199,36 @@ pub(crate) fn backfill(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Minuten-Aggregate `[lo, hi)` (minutengenau) von Schema `from` nach `to` übernehmen und die Stunden-Aggregate der
+/// betroffenen Stunden in `to` aus dessen Minuten neu berechnen – so stimmen sie auch, wenn eine Stunde in mehreren
+/// Schritten ankommt.
+pub(crate) fn copy_range(conn: &Connection, from: &str, to: &str, lo: i64, hi: i64) -> rusqlite::Result<()> {
+    let (hour_lo, hour_hi) = (lo.div_euclid(HOUR_MS) * HOUR_MS, (hi + HOUR_MS - 1).div_euclid(HOUR_MS) * HOUR_MS);
+    for kind in Kind::ALL {
+        let keys = kind.key_columns();
+        let (minute, hour) = (kind.table(Level::Minute), kind.table(Level::Hour));
+        conn.execute(
+            &format!(
+                "INSERT INTO {to}.{minute} (t, {keys}, bytes, packets, flows)
+                 SELECT t, {keys}, bytes, packets, flows FROM {from}.{minute} WHERE t >= ?1 AND t < ?2
+                 ON CONFLICT (t, {keys}) DO UPDATE SET
+                     bytes = bytes + excluded.bytes, packets = packets + excluded.packets, flows = flows + excluded.flows"
+            ),
+            params![lo, hi],
+        )?;
+        conn.execute(&format!("DELETE FROM {to}.{hour} WHERE t >= ?1 AND t < ?2"), params![hour_lo, hour_hi])?;
+        conn.execute(
+            &format!(
+                "INSERT INTO {to}.{hour} (t, {keys}, bytes, packets, flows)
+                 SELECT (t / {HOUR_MS}) * {HOUR_MS}, {keys}, SUM(bytes), SUM(packets), SUM(flows)
+                 FROM {to}.{minute} WHERE t >= ?1 AND t < ?2 GROUP BY 1, {keys}"
+            ),
+            params![hour_lo, hour_hi],
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Default, Clone, Copy)]
 struct Sums {
     bytes: i64,

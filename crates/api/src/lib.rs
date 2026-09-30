@@ -1,5 +1,8 @@
 //! HTTP-Schnittstelle: REST-API unter `/api`, WebSocket-Live-Stream unter `/api/live` und Auslieferung des gebauten
 //! Frontends (Single-Page-App) für alle übrigen Pfade.
+//!
+//! Suche und Statistiken lesen standardmäßig die Live-Datenbank. Mit `?source=history` lesen sie die Historie, mit
+//! `?source=archive:<name>` ein zuvor über `POST /api/archives/<name>/open` entpacktes Archiv.
 
 mod live;
 mod pcap;
@@ -8,14 +11,14 @@ pub use live::LiveHub;
 
 use axum::extract::DefaultBodyLimit;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use collector::CollectorMetrics;
-use db::{Database, DbError, FlowFilter};
+use db::{Database, DbError, FlowFilter, History};
 use geo::{GeoInfo, GeoLookup};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +30,8 @@ use tower_http::services::{ServeDir, ServeFile};
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
+    /// Historie und Archive (`None`, wenn `[history]` abgeschaltet ist)
+    pub history: Option<History>,
     pub metrics: Arc<CollectorMetrics>,
     pub live: LiveHub,
     /// Ist ein Token gesetzt, verlangt jede API-Anfrage `Authorization: Bearer <token>` (WebSocket/Download: `?token=`).
@@ -58,6 +63,8 @@ pub fn router(state: AppState, frontend_dir: PathBuf) -> Router {
         .route("/stats/connections", get(connections))
         .route("/stats/peers", get(peers))
         .route("/stats/geo", get(geo_stats))
+        .route("/archives", get(archives))
+        .route("/archives/{name}/open", post(open_archive))
         .route("/pcap", get(pcap::list).post(pcap::upload).layer(DefaultBodyLimit::disable()))
         .route("/pcap/{id}", get(pcap::get).merge(delete(pcap::delete)))
         .route("/live", get(live_ws))
@@ -85,6 +92,7 @@ impl From<DbError> for ApiError {
     fn from(err: DbError) -> Self {
         match err {
             DbError::InvalidFilter(msg) => ApiError(StatusCode::BAD_REQUEST, msg),
+            DbError::Unavailable(msg) => ApiError(StatusCode::CONFLICT, msg),
             other => {
                 tracing::error!(err = %other, "Datenbankfehler");
                 ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Datenbankfehler".into())
@@ -124,11 +132,66 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ------------------------------------------------------------------------------------------------------ Endpunkte
 
+// ------------------------------------------------------------------------------------------------------ Datenquelle
+
+/// Datenquelle einer Abfrage: `live` (Standard), `history` oder `archive:<name>`. Getrennt von `FlowFilter` aus demselben
+/// Grund wie [`SeriesParams`].
+#[derive(Deserialize, Default)]
+struct SourceParams {
+    source: Option<String>,
+}
+
+impl AppState {
+    fn source(&self, params: &SourceParams) -> Result<Database, ApiError> {
+        let source = params.source.as_deref().map(str::trim).unwrap_or("");
+        if source.is_empty() || source == "live" {
+            return Ok(self.db.clone());
+        }
+        let history = self.history.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Historie ist abgeschaltet ([history] enabled = false)".into()))?;
+        Ok(match source.strip_prefix("archive:") {
+            Some(name) => history.archive(name)?,
+            None if source == "history" => history.current()?,
+            None => return Err(ApiError(StatusCode::BAD_REQUEST, format!("source: erlaubt sind live, history, archive:<name> – nicht {source}"))),
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct Archives {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history: Option<db::HistoryStatus>,
+    archives: Vec<db::ArchiveInfo>,
+}
+
+async fn archives(State(s): State<AppState>) -> ApiResult<Archives> {
+    let Some(history) = &s.history else {
+        return Ok(Json(Archives { enabled: false, history: None, archives: Vec::new() }));
+    };
+    let status = history.status().await?;
+    let h = history.clone();
+    let list = tokio::task::spawn_blocking(move || h.archives()).await.map_err(DbError::from)??;
+    Ok(Json(Archives { enabled: true, history: Some(status), archives: list }))
+}
+
+#[derive(Serialize)]
+struct ArchiveState {
+    state: &'static str,
+}
+
+/// Archiv zum Ansehen entpacken. Antwortet sofort mit `unpacking` oder `ready`; Fortschritt über `GET /archives`.
+async fn open_archive(State(s): State<AppState>, Path(name): Path<String>) -> ApiResult<ArchiveState> {
+    let history = s.history.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Historie ist abgeschaltet".into()))?;
+    Ok(Json(ArchiveState { state: history.open_archive(&name)? }))
+}
+
 #[derive(Serialize)]
 struct Status {
     started_ms: i64,
     now_ms: i64,
     retention_hours: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history: Option<db::HistoryStatus>,
     collector: collector::MetricsSnapshot,
     db: db::DbStats,
     geoip: &'static str,
@@ -144,6 +207,10 @@ async fn status(State(s): State<AppState>) -> ApiResult<Status> {
         started_ms: s.started_ms,
         now_ms: model::now_ms(),
         retention_hours: db.retention_hours,
+        history: match &s.history {
+            Some(history) => Some(history.status().await?),
+            None => None,
+        },
         collector: s.metrics.snapshot(),
         db,
         geoip: s.geo.describe(),
@@ -174,13 +241,13 @@ struct WithGeo<T> {
     geo: Option<GeoInfo>,
 }
 
-async fn flows(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::FlowRow>>> {
-    let rows = s.db.query_flows(f).await?;
+async fn flows(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::FlowRow>>> {
+    let rows = s.source(&src)?.query_flows(f).await?;
     Ok(Json(rows.into_iter().map(|row| WithPeerGeo { src_geo: s.geo.lookup_str(&row.src_ip), dst_geo: s.geo.lookup_str(&row.dst_ip), row }).collect()))
 }
 
-async fn talkers(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithGeo<db::TalkerStat>>> {
-    let rows = s.db.top_talkers(f).await?;
+async fn talkers(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithGeo<db::TalkerStat>>> {
+    let rows = s.source(&src)?.top_talkers(f).await?;
     Ok(Json(rows.into_iter().map(|row| WithGeo { geo: s.geo.lookup_str(&row.ip), row }).collect()))
 }
 
@@ -209,9 +276,9 @@ struct GeoStats {
 }
 
 /// Verkehr externer Gegenstellen nach Land und autonomem System (je IP summiert, dann gruppiert).
-async fn geo_stats(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<GeoStats> {
+async fn geo_stats(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<GeoStats> {
     let limit = f.limit.unwrap_or(10).clamp(1, 50) as usize;
-    let ips = s.db.ip_totals(f, 50_000).await?;
+    let ips = s.source(&src)?.ip_totals(f, 50_000).await?;
     let mut countries: HashMap<String, GeoBucket> = HashMap::new();
     let mut asns: HashMap<u32, GeoBucket> = HashMap::new();
     let mut unknown_bytes = 0;
@@ -247,16 +314,16 @@ async fn geo_stats(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> Ap
     }))
 }
 
-async fn ports(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::PortStat>> {
-    Ok(Json(s.db.top_ports(f).await?))
+async fn ports(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::PortStat>> {
+    Ok(Json(s.source(&src)?.top_ports(f).await?))
 }
 
-async fn protocols(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::ProtocolStat>> {
-    Ok(Json(s.db.protocols(f).await?))
+async fn protocols(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::ProtocolStat>> {
+    Ok(Json(s.source(&src)?.protocols(f).await?))
 }
 
-async fn directions(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::DirectionStat>> {
-    Ok(Json(s.db.directions(f).await?))
+async fn directions(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<db::DirectionStat>> {
+    Ok(Json(s.source(&src)?.directions(f).await?))
 }
 
 /// Zusätzlicher Parameter der Zeitreihe. Bewusst getrennt von `FlowFilter` statt `#[serde(flatten)]`:
@@ -272,23 +339,23 @@ struct Series {
     points: Vec<db::TimePoint>,
 }
 
-async fn timeseries(State(s): State<AppState>, Query(f): Query<FlowFilter>, Query(p): Query<SeriesParams>) -> ApiResult<Series> {
-    let (step_ms, points) = s.db.timeseries(f, p.points.unwrap_or(120)).await?;
+async fn timeseries(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>, Query(p): Query<SeriesParams>) -> ApiResult<Series> {
+    let (step_ms, points) = s.source(&src)?.timeseries(f, p.points.unwrap_or(120)).await?;
     Ok(Json(Series { step_ms, points }))
 }
 
-async fn connections(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::ConnectionStat>>> {
-    let rows = s.db.connections(f).await?;
+async fn connections(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::ConnectionStat>>> {
+    let rows = s.source(&src)?.connections(f).await?;
     Ok(Json(rows.into_iter().map(|row| WithPeerGeo { src_geo: s.geo.lookup_str(&row.src_ip), dst_geo: s.geo.lookup_str(&row.dst_ip), row }).collect()))
 }
 
-async fn peers(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::PeerStat>>> {
-    let rows = s.db.peers(f).await?;
+async fn peers(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<Vec<WithPeerGeo<db::PeerStat>>> {
+    let rows = s.source(&src)?.peers(f).await?;
     Ok(Json(rows.into_iter().map(|row| WithPeerGeo { src_geo: s.geo.lookup_str(&row.src_ip), dst_geo: s.geo.lookup_str(&row.dst_ip), row }).collect()))
 }
 
-async fn sankey(State(s): State<AppState>, Query(f): Query<FlowFilter>) -> ApiResult<db::SankeyGraph> {
-    let mut graph = s.db.sankey(f).await?;
+async fn sankey(State(s): State<AppState>, Query(src): Query<SourceParams>, Query(f): Query<FlowFilter>) -> ApiResult<db::SankeyGraph> {
+    let mut graph = s.source(&src)?.sankey(f).await?;
     for node in graph.nodes.iter_mut().filter(|n| n.kind != "service") {
         node.cc = s.geo.lookup_str(&node.label).and_then(|g| g.cc);
     }

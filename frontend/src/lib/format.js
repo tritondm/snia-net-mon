@@ -37,6 +37,10 @@ export function fmtTime(ms, withDate = false) {
   return withDate ? `${d.toLocaleDateString('de-AT', { day: '2-digit', month: '2-digit' })} ${time}` : time;
 }
 
+export function fmtDate(ms) {
+  return new Date(ms).toLocaleString('de-AT', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
 export function fmtAgo(ms, now = Date.now()) {
   const s = Math.max(0, Math.round((now - ms) / 1000));
   if (s < 60) return `${s}s`;

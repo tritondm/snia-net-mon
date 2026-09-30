@@ -18,6 +18,13 @@ local_networks = [
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
     "169.254.0.0/16", "127.0.0.0/8", "fc00::/7", "fe80::/10",
 ]
+# Ausgenommene Netze: Verkehr, dessen Quelle ODER Ziel hier liegt, wird sofort verworfen – nicht gespeichert, nicht live
+# angezeigt, nicht für den Upload-Alarm gezählt. Z. B. Backup-Server, Gäste-WLAN oder ein Storage-VLAN.
+# Die Anzahl verworfener Flows steht unter /api/status (collector.excluded_flows).
+exclude_networks = [
+    # "10.99.0.0/16",
+    # "192.168.50.20",
+]
 
 [collector]
 # Hierhin schickt die pfSense (softflowd) NetFlow v9 oder IPFIX.
@@ -28,11 +35,48 @@ workers = 2
 recv_buffer_mb = 16
 
 [storage]
+# Live-Datenbank: Dashboard, Live-Ansicht und Flow-Suche (Quelle "live").
 path = "data/flows.db"
-# Aufbewahrung in Stunden – höchstens 72, größere Werte werden automatisch auf 72 begrenzt.
-retention_hours = 72
-# Wie oft abgelaufene Daten gelöscht werden.
+# Live-Fenster in Stunden – höchstens 72. Ältere Flows wandern in die Historie (oder werden gelöscht, siehe [history]).
+retention_hours = 48
+# Wie oft abgelaufene Daten verschoben bzw. gelöscht werden.
 cleanup_interval_secs = 60
+
+[history]
+# Flows nach dem Live-Fenster in eine eigene Datenbank übernehmen. false = löschen (keine Historie, kein Archiv).
+enabled = true
+path = "data/history.db"
+# Erreicht die Historie diese Größe, wird sie als stark komprimiertes Archiv (zstd) abgelegt und neu begonnen.
+max_size_gb = 50
+archive_dir = "data/archive"
+# Archive werden so viele Tage nach ihrem jüngsten Flow automatisch gelöscht.
+archive_retention_days = 90
+# zstd-Stufe 1–22: höher = kleiner, aber langsamer. 19 komprimiert gut und läuft im Hintergrund.
+compression_level = 19
+
+[alerts]
+# Upload-Alarm: lädt eine einzelne Verbindung (Quelle, Ziel, Ports, Protokoll) mehr als so viele MiB nach extern hoch,
+# geht eine Mail an die Admins aus [email]. 1024 = 1 GiB, 0 = aus. Ohne [email] steht der Alarm nur im Log.
+upload_threshold_mb = 1024
+# Ohne neue Flows seit so vielen Sekunden gilt eine Verbindung als beendet und wird neu gezählt.
+session_idle_secs = 600
+# Obergrenze gegen Mail-Fluten, z. B. bei Backups mit vielen parallelen Verbindungen.
+max_mails_per_hour = 20
+
+[email]
+# SMTP-Server für Mails an die Admins. Leer = kein Mailversand. Testen mit: snia-net-mon --test-mail
+smtp_host = ""
+# 587 mit starttls, 465 mit tls, 25 mit none (none nur für einen Relay im eigenen Netz)
+smtp_port = 587
+security = "starttls"
+username = ""
+# Alternativ per Umgebungsvariable SNIA_SMTP_PASSWORD, dann steht das Passwort nicht in der Datei.
+password = ""
+from = "Snia-Net-Mon <netmon@example.org>"
+admins = [
+    # "admin@example.org",
+]
+timeout_secs = 30
 
 [geoip]
 # MaxMind GeoLite2 (kostenlos, Konto auf maxmind.com). Fehlende Dateien = keine Geo-Daten, kein Fehler.

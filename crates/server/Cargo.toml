@@ -1,6 +1,6 @@
 [package]
 name = "snia-net-mon"
-description = "pfSense-Netzwerkmonitor: NetFlow/IPFIX-Collector, Speicher mit 72-h-Retention, API und Web-UI"
+description = "pfSense-Netzwerkmonitor: NetFlow/IPFIX-Collector, Live-Speicher mit Historie und Archiv, Upload-Alarm, API und Web-UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,7 @@ api.workspace = true
 geo.workspace = true
 maxminddb.workspace = true
 pcap.workspace = true
+alert.workspace = true
 tokio.workspace = true
 axum.workspace = true
 serde.workspace = true

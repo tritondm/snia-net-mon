@@ -14,6 +14,7 @@
     { key: 'dashboard', n: 1, label: 'dashboard' },
     { key: 'flows', n: 2, label: 'flows' },
     { key: 'pcap', n: 3, label: 'pcap' },
+    { key: 'archive', n: 4, label: 'archiv' },
   ];
 
   const drops = $derived((live.collector?.dropped_flows ?? 0) + (live.collector?.parse_errors ?? 0));
@@ -60,8 +61,8 @@
     <span class="chip {drops > 0 ? '!border-ctp-red/60 text-ctp-red' : ''}" title="Verworfene Flows + Parse-Fehler seit Start">
       <span class="led {drops > 0 ? 'bg-ctp-red' : 'bg-ctp-green'}"></span>drop {fmtNum(drops)}
     </span>
-    <span class="chip" title="Gespeicherte Flows / Aufbewahrung">
-      <span class="text-ctp-sapphire">◫</span>{fmtNum(status?.db?.rows ?? 0)} · {status?.retention_hours ?? 72}h
+    <span class="chip" title="Flows in der Live-Datenbank / Live-Fenster">
+      <span class="text-ctp-sapphire">◫</span>{fmtNum(status?.db?.rows ?? 0)} · {status?.retention_hours ?? 48}h
     </span>
     <span class="chip text-ctp-text">{clock.toLocaleTimeString('de-AT', { hour12: false })}</span>
   </div>

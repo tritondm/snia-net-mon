@@ -3,8 +3,10 @@
 //! Datenfluss:
 //! ```text
 //! pfSense (softflowd) ──UDP 2055──▶ collector ──batch──┬──▶ db (Writer-Thread → SQLite, Retention-Task)
-//!                                                      └──▶ api::LiveHub ──WebSocket──▶ Browser
-//! Browser ──REST──▶ api ──▶ db (Abfragen)
+//!   (ausgenommene Netze werden hier verworfen)         │      └─ nach 48 h ──▶ Historie ──ab 50 GB──▶ zstd-Archiv
+//!                                                      ├──▶ api::LiveHub ──WebSocket──▶ Browser
+//!                                                      └──▶ alert (Upload > Schwelle je Verbindung) ──SMTP──▶ Admins
+//! Browser ──REST──▶ api ──▶ db (Abfragen auf Live, Historie oder entpacktem Archiv)
 //! ```
 
 mod geoupdate;
@@ -24,6 +26,9 @@ struct Config {
     network: NetworkSection,
     collector: CollectorSection,
     storage: StorageSection,
+    history: HistorySection,
+    alerts: AlertsSection,
+    email: EmailSection,
     geoip: GeoipSection,
     pcap: PcapSection,
     /// Früherer Abschnitt `[tracer]` – wird nur noch toleriert, damit alte config.toml-Dateien weiter laden.
@@ -49,11 +54,13 @@ impl Default for ServerConfig {
 struct NetworkSection {
     /// Interne Netze (CIDR). Verkehr von extern nach hier = "in" (Download), von hier nach extern = "out" (Upload).
     local_networks: Vec<String>,
+    /// Ausgenommene Netze (CIDR): Flows mit Quelle ODER Ziel darin werden weder gespeichert noch angezeigt.
+    exclude_networks: Vec<String>,
 }
 
 impl Default for NetworkSection {
     fn default() -> Self {
-        Self { local_networks: model::LocalNetworks::DEFAULT.iter().map(|s| s.to_string()).collect() }
+        Self { local_networks: model::LocalNetworks::DEFAULT.iter().map(|s| s.to_string()).collect(), exclude_networks: Vec::new() }
     }
 }
 
@@ -81,7 +88,104 @@ struct StorageSection {
 
 impl Default for StorageSection {
     fn default() -> Self {
-        Self { path: "data/flows.db".into(), retention_hours: model::MAX_RETENTION_HOURS, cleanup_interval_secs: 60 }
+        Self { path: "data/flows.db".into(), retention_hours: 48, cleanup_interval_secs: 60 }
+    }
+}
+
+/// Historie: Flows nach dem Live-Fenster, bis `max_size_gb`; danach Rotation in ein zstd-Archiv.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HistorySection {
+    /// `false` = Flows nach dem Live-Fenster löschen (Verhalten ohne Historie)
+    enabled: bool,
+    path: PathBuf,
+    max_size_gb: f64,
+    archive_dir: PathBuf,
+    archive_retention_days: u64,
+    compression_level: i32,
+}
+
+impl Default for HistorySection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: "data/history.db".into(),
+            max_size_gb: 50.0,
+            archive_dir: "data/archive".into(),
+            archive_retention_days: 90,
+            compression_level: 19,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AlertsSection {
+    /// Upload-Alarm ab so vielen MiB in einer Verbindung; 0 = aus
+    upload_threshold_mb: u64,
+    /// Ohne neue Flows so lange gilt eine Verbindung als beendet
+    session_idle_secs: u64,
+    max_mails_per_hour: u32,
+}
+
+impl Default for AlertsSection {
+    fn default() -> Self {
+        Self { upload_threshold_mb: 1024, session_idle_secs: 600, max_mails_per_hour: 20 }
+    }
+}
+
+/// SMTP-Zugang für Mails an die Admins. Leerer `smtp_host` = kein Mailversand.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct EmailSection {
+    smtp_host: String,
+    smtp_port: u16,
+    /// `starttls` (Port 587), `tls` (Port 465) oder `none` (nur Relay im eigenen Netz)
+    security: String,
+    username: String,
+    /// Alternativ per Umgebungsvariable `SNIA_SMTP_PASSWORD`
+    password: String,
+    from: String,
+    admins: Vec<String>,
+    timeout_secs: u64,
+}
+
+impl Default for EmailSection {
+    fn default() -> Self {
+        Self {
+            smtp_host: String::new(),
+            smtp_port: 587,
+            security: "starttls".into(),
+            username: String::new(),
+            password: String::new(),
+            from: String::new(),
+            admins: Vec::new(),
+            timeout_secs: 30,
+        }
+    }
+}
+
+impl EmailSection {
+    /// Mailer aus der Konfiguration; `Ok(None)`, wenn kein SMTP-Server eingetragen ist.
+    fn mailer(&self) -> Result<Option<alert::Mailer>> {
+        if self.smtp_host.trim().is_empty() {
+            return Ok(None);
+        }
+        let security = alert::Security::parse(&self.security)
+            .ok_or_else(|| anyhow::anyhow!("email.security: erlaubt sind starttls, tls, none – nicht {:?}", self.security))?;
+        let password = std::env::var("SNIA_SMTP_PASSWORD").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| self.password.clone());
+        let mailer = alert::Mailer::new(&alert::MailConfig {
+            host: self.smtp_host.clone(),
+            port: self.smtp_port,
+            security,
+            username: self.username.clone(),
+            password,
+            from: self.from.clone(),
+            to: self.admins.clone(),
+            timeout: Duration::from_secs(self.timeout_secs.clamp(5, 300)),
+        })
+        .map_err(|e| anyhow::anyhow!("email: {e}"))?;
+        Ok(Some(mailer))
     }
 }
 
@@ -150,16 +254,33 @@ impl Default for PcapSection {
     }
 }
 
-fn load_config() -> Result<Config> {
-    let mut args = std::env::args().skip(1);
-    let path = match args.next().as_deref() {
-        Some("-h" | "--help") => {
-            println!("Aufruf: snia-net-mon [config.toml]\nOhne Angabe wird ./config.toml gelesen (falls vorhanden), sonst gelten die Standardwerte.");
-            std::process::exit(0);
+/// Kommandozeile: `[--test-mail] [config.toml]`
+struct Args {
+    config: Option<PathBuf>,
+    test_mail: bool,
+}
+
+fn parse_args() -> Args {
+    let mut args = Args { config: None, test_mail: false };
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                println!(
+                    "Aufruf: snia-net-mon [--test-mail] [config.toml]\n\
+                     Ohne Angabe wird ./config.toml gelesen (falls vorhanden), sonst gelten die Standardwerte.\n\
+                     --test-mail  schickt eine Test-Mail an die Admins aus [email] und beendet sich"
+                );
+                std::process::exit(0);
+            }
+            "--test-mail" => args.test_mail = true,
+            path => args.config = Some(PathBuf::from(path)),
         }
-        Some(p) => Some(PathBuf::from(p)),
-        None => Some(PathBuf::from("config.toml")).filter(|p| p.exists()),
-    };
+    }
+    args
+}
+
+fn load_config(path: Option<PathBuf>) -> Result<Config> {
+    let path = path.or_else(|| Some(PathBuf::from("config.toml")).filter(|p| p.exists()));
     match path {
         Some(path) => {
             let text = std::fs::read_to_string(&path).with_context(|| format!("{} nicht lesbar", path.display()))?;
@@ -179,7 +300,17 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tower_http=warn".into()))
         .init();
-    let config = load_config()?;
+    let args = parse_args();
+    let config = load_config(args.config)?;
+    if args.test_mail {
+        let mailer = config.email.mailer()?.context("email.smtp_host ist leer – kein Mailversand konfiguriert")?;
+        mailer
+            .send("[snia-net-mon] Test-Mail", "Diese Test-Mail bestätigt, dass der Mailversand von Snia-Net-Mon funktioniert.\n")
+            .await
+            .map_err(|e| anyhow::anyhow!("Test-Mail fehlgeschlagen: {e}"))?;
+        println!("Test-Mail gesendet an {}", mailer.recipients());
+        return Ok(());
+    }
     if config.tracer.is_some() {
         tracing::warn!("Abschnitt [tracer] in der Konfiguration wird ignoriert (Tracing wurde entfernt)");
     }
@@ -192,14 +323,40 @@ async fn main() -> Result<()> {
         cleanup_interval: Duration::from_secs(config.storage.cleanup_interval_secs.clamp(10, 3600)),
     })
     .context("Datenbank konnte nicht geöffnet werden")?;
+    let history = if config.history.enabled {
+        let h = &config.history;
+        let history = db::History::open(db::HistoryConfig {
+            path: h.path.clone(),
+            max_bytes: (h.max_size_gb.max(0.01) * 1024.0 * 1024.0 * 1024.0) as u64,
+            archive_dir: h.archive_dir.clone(),
+            archive_retention: Duration::from_secs(h.archive_retention_days.clamp(1, 3650) * 86_400),
+            compression_level: h.compression_level.clamp(1, 22),
+        })
+        .context("Historie konnte nicht geöffnet werden")?;
+        tracing::info!(
+            live_hours = config.storage.retention_hours.min(model::MAX_RETENTION_HOURS),
+            max_gb = h.max_size_gb,
+            archive_days = h.archive_retention_days,
+            "Historie aktiv: live → Historie → Archiv"
+        );
+        Some(history)
+    } else {
+        tracing::info!("Historie abgeschaltet – Flows werden nach dem Live-Fenster gelöscht");
+        None
+    };
     let (db_tx, db_rx) = mpsc::channel(1024);
     let writer = database.spawn_writer(db_rx)?;
-    let cleanup = database.spawn_cleanup(shutdown_rx.clone());
+    let cleanup = database.spawn_cleanup(history.clone(), shutdown_rx.clone());
 
     // --- Collector + Live-Ansicht
     let local_networks = model::LocalNetworks::parse(&config.network.local_networks)
         .map_err(|e| anyhow::anyhow!("network.local_networks: {e}"))?;
     tracing::info!(networks = ?config.network.local_networks, "interne Netze für die Richtungserkennung");
+    let exclude_networks = model::LocalNetworks::parse(&config.network.exclude_networks)
+        .map_err(|e| anyhow::anyhow!("network.exclude_networks: {e}"))?;
+    if !exclude_networks.is_empty() {
+        tracing::info!(networks = ?config.network.exclude_networks, "ausgenommene Netze – deren Verkehr wird verworfen");
+    }
     let metrics = Arc::new(collector::CollectorMetrics::default());
     let geo = Arc::new(geo::GeoLookup::open(Some(&config.geoip.country_db), Some(&config.geoip.asn_db)));
     let geo_credentials = config.geoip.credentials();
@@ -216,15 +373,42 @@ async fn main() -> Result<()> {
     );
     let (live_tx, live_rx) = mpsc::channel(256);
     let live = api::LiveHub::spawn(live_rx, metrics.clone(), geo.clone(), shutdown_rx.clone());
+    let mut sinks = vec![db_tx, live_tx];
+
+    // --- Upload-Alarm
+    let mailer = config.email.mailer()?;
+    let alerts = &config.alerts;
+    let upload_watch = if alerts.upload_threshold_mb > 0 {
+        match &mailer {
+            Some(m) => tracing::info!(threshold_mb = alerts.upload_threshold_mb, to = %m.recipients(), "Upload-Alarm aktiv"),
+            None => tracing::warn!(threshold_mb = alerts.upload_threshold_mb, "Upload-Alarm ohne Mailversand ([email] smtp_host leer) – nur im Log"),
+        }
+        let (alert_tx, alert_rx) = mpsc::channel(256);
+        sinks.push(alert_tx);
+        Some(alert::spawn_upload_watch(
+            alert::UploadAlertConfig {
+                threshold_bytes: alerts.upload_threshold_mb * 1024 * 1024,
+                session_idle: Duration::from_secs(alerts.session_idle_secs.clamp(60, 86_400)),
+                max_mails_per_hour: alerts.max_mails_per_hour.max(1),
+            },
+            alert_rx,
+            geo.clone(),
+            mailer,
+            shutdown_rx.clone(),
+        ))
+    } else {
+        None
+    };
     let collectors = collector::spawn_collector(
         collector::CollectorConfig {
             bind: config.collector.listen,
             workers: config.collector.workers.clamp(1, 64),
             recv_buffer_bytes: config.collector.recv_buffer_mb.clamp(1, 1024) * 1024 * 1024,
             local_networks: Arc::new(local_networks),
+            exclude_networks: Arc::new(exclude_networks),
             ..Default::default()
         },
-        vec![db_tx, live_tx],
+        sinks,
         metrics.clone(),
         shutdown_rx.clone(),
     )
@@ -237,6 +421,7 @@ async fn main() -> Result<()> {
     }
     let state = api::AppState {
         db: database.clone(),
+        history,
         metrics,
         live,
         api_token: (!token.is_empty()).then(|| Arc::from(token)),
@@ -274,6 +459,9 @@ async fn main() -> Result<()> {
         let _ = handle.await;
     }
     let _ = cleanup.await;
+    if let Some(watch) = upload_watch {
+        let _ = watch.await;
+    }
     geo_updater.abort();
     tokio::task::spawn_blocking(move || writer.join()).await?.ok();
     tracing::info!("beendet");

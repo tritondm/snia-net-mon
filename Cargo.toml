@@ -9,6 +9,7 @@ members = [
     "crates/pcap",
     "crates/server",
     "crates/flowgen",
+    "crates/alert",
 ]
 
 [workspace.package]
@@ -24,6 +25,7 @@ db = { path = "crates/db" }
 api = { path = "crates/api" }
 geo = { path = "crates/geo" }
 pcap = { path = "crates/pcap" }
+alert = { path = "crates/alert" }
 
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "fs", "io-util"] }
 axum = { version = "0.8", features = ["ws"] }
