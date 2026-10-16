@@ -334,12 +334,8 @@ live/ (48 h) ──jede volle Stunde──▶ history/ ──ab 50 GB──▶ a
   Hochgeladene Capture-Dateien liegen nur während der Analyse als temporäre Datei in `pcap.upload_dir` und werden danach
   sofort entfernt – auch bei Fehlern; Reste nach einem Absturz räumt der nächste Start weg.
 
-**Datenschutz:** Verbindungsdaten sind personenbezogen. Mit Historie und Archiv werden sie bis zu drei Monate (plus die
-Zeit bis zur Rotation) aufbewahrt – das sollte zur internen Richtlinie bzw. Betriebsvereinbarung passen. Muss
-nachweisbar sein, dass gelöschte Flows auch physisch verschwinden, `storage.secure_delete = true` lassen und den
-Datenträger verschlüsseln (siehe [Speicher](#speicher-eine-sqlite-datei-pro-stunde)). Kleine Netze
-erreichen 50 GB eventuell nie; dann bleibt die Historie so lange liegen, bis sie voll ist. `max_size_gb` entsprechend
-wählen.
+Wie lange Daten damit insgesamt aufbewahrt werden und was das für den Datenschutz bedeutet, steht unter
+[Datenschutz](#datenschutz).
 
 ### Upload-Alarm
 
@@ -355,6 +351,77 @@ Mailversand oder wenn `max_mails_per_hour` erreicht ist.
 
 - Die Web-UI lauscht standardmäßig nur auf `127.0.0.1`. Für Netzzugriff `api_token` setzen und einen Reverse-Proxy mit HTTPS
   davorstellen. Der WebSocket akzeptiert das Token als `?token=`.
+
+## Datenschutz
+
+Snia-Net-Mon zeichnet auf, welches Gerät wann mit wem wie viel Daten ausgetauscht hat. Über die DHCP-Leases der pfSense,
+Anmeldungen am WLAN oder feste Gerätezuordnungen lassen sich IP-Adressen meist einer Person zuordnen – die gespeicherten
+Daten sind deshalb **personenbezogen** im Sinne der DSGVO. Das gilt besonders an Schulen, wo Schülerinnen und Schüler
+(oft minderjährig) und Lehrkräfte dasselbe Netz nutzen.
+
+> Dieser Abschnitt beschreibt, was die Software technisch speichert, und gibt Hinweise für den Einsatz. Er ist keine
+> Rechtsberatung. Ob und in welchem Umfang der Betrieb zulässig ist, klärt die verantwortliche Stelle (Schulleitung bzw.
+> Schulerhalter) mit ihrer bzw. ihrem Datenschutzbeauftragten.
+
+### Was gespeichert wird
+
+| Daten | Inhalt | Wo | Wie lange (Standard) |
+|---|---|---|---|
+| **Flows** (NetFlow/IPFIX) | Beginn und Ende, Quell- und Ziel-IP, Ports, Protokoll, Bytes, Pakete, TCP-Flags, Interfaces, Richtung. **Keine Inhalte**, keine URLs, keine Domains | `storage.dir`, eine Datei pro Stunde | 48 h live (auf der Platte bis 49 h), danach Historie und Archiv |
+| **Aggregate** | Bytes und Pakete je IP, Dienst und IP-Paar pro Minute bzw. Stunde | `index.db` | wie die Flows |
+| **Historie** | verschobene Stundendateien und Aggregate | `history.dir` | bis `max_size_gb` (50 GB) erreicht ist |
+| **Archiv** | gepackte Historie | `history.archive_dir` | 90 Tage nach dem jüngsten Flow |
+| **PCAP-Analysen** | Ergebnis einer hochgeladenen Capture-Datei: IPs, **Domains** (DNS, TLS-SNI), **HTTP-Hosts und -URLs**, erkannte Anwendungen | `index.db` | 48 h, nicht archiviert. Die Capture-Datei selbst wird direkt nach der Analyse gelöscht |
+| **Upload-Alarm** | Quelle, Ziel, Dienst, Menge und Zeitraum der Verbindung | Mail an `email.admins`, Log | je nach Mailpostfach bzw. Log-Rotation des Systems |
+
+Land und ASN einer IP werden lokal aus den GeoLite2-Dateien nachgeschlagen, nicht gespeichert. Snia-Net-Mon schickt
+keine Verbindungsdaten nach außen. Die einzige ausgehende Verbindung ist der optionale Download der GeoIP-Datenbanken bei
+MaxMind, dabei werden nur Konto-ID und Lizenzschlüssel übertragen. Die Web-UI lädt keine externen Schriften, Skripte
+oder Bilder.
+
+**Gesamtdauer beachten:** Mit Historie und Archiv bleiben Flows bis zu drei Monate *nach* der Rotation erhalten. In
+kleinen Netzen kann es lange dauern, bis die Historie 50 GB erreicht – bis dahin wird sie gar nicht rotiert. Die
+tatsächliche Aufbewahrung kann so deutlich über 90 Tagen liegen.
+
+### Empfehlungen für Schulen
+
+- **So kurz wie möglich speichern** (Datenminimierung). Für Fehlersuche und Lastanalyse reicht meist das Live-Fenster:
+  ```toml
+  [storage]
+  retention_hours = 24     # oder weniger
+
+  [history]
+  enabled = false          # keine Historie, kein Archiv – nach dem Live-Fenster wird gelöscht
+  ```
+  Wird eine Historie gebraucht, `max_size_gb` klein wählen und `archive_retention_days` auf die Frist setzen, die in der
+  Schule festgelegt ist.
+- **Netze ausnehmen**, die nicht überwacht werden sollen oder müssen, z. B. das Verwaltungs- oder Lehrkräftenetz oder
+  ein Gäste-WLAN: `network.exclude_networks`. Diese Flows werden sofort verworfen und nirgends gespeichert.
+- **Zugriff beschränken:** Die Web-UI zeigt alle gespeicherten Verbindungen. Nur die zuständigen Administratorinnen
+  und Administratoren sollten sie erreichen: `listen` auf `127.0.0.1` lassen oder `api_token` setzen und HTTPS über einen
+  Reverse-Proxy verwenden (siehe [Sicherheit](#sicherheit)).
+- **Datenträger verschlüsseln** und `storage.secure_delete = true` lassen. Auf SSDs und Copy-on-Write-Dateisystemen
+  (btrfs, ZFS) ist das Überschreiben nicht garantiert wirksam; dort schützt erst die Verschlüsselung gelöschte Daten
+  zuverlässig.
+- **PCAP-Analysen sparsam einsetzen.** Eine Capture-Datei enthält Paketinhalte; die gespeicherte Analyse enthält
+  besuchte Domains und unverschlüsselte URLs. Nur für konkrete Fehlersuche verwenden.
+- **Upload-Alarm prüfen:** Die Mails enthalten IP-Adressen und landen in Postfächern außerhalb von Snia-Net-Mon. Nur
+  einschalten, wenn er gebraucht wird (`alerts.upload_threshold_mb = 0` schaltet ihn ab), und die Empfängerliste klein
+  halten.
+
+### Organisatorisches
+
+Vor dem Einsatz sollte die Schule in der Regel:
+
+- den **Zweck** festlegen (z. B. Sicherstellung des Netzbetriebs, Fehlersuche, Erkennen von Schadsoftware) und die
+  Verarbeitung ins **Verzeichnis der Verarbeitungstätigkeiten** aufnehmen,
+- **Speicherfristen** und **zugriffsberechtigte Personen** schriftlich festhalten und die Konfiguration daran ausrichten,
+- die Nutzerinnen und Nutzer **informieren**, etwa in der Nutzungsordnung bzw. IT-Benutzungsordnung der Schule,
+- die **Personalvertretung** bzw. den Personalrat einbeziehen, wenn auch Geräte von Lehrkräften oder Verwaltung
+  erfasst werden – eine Netzwerküberwachung kann zur Leistungs- und Verhaltenskontrolle geeignet sein,
+- mit der bzw. dem **Datenschutzbeauftragten** klären, ob eine Datenschutz-Folgenabschätzung nötig ist.
+
+Snia-Net-Mon ist für den Netzbetrieb gedacht, nicht zur Überwachung einzelner Personen.
 
 ## API
 
