@@ -41,6 +41,8 @@ pub struct HistoryConfig {
     pub archive_retention: Duration,
     /// zstd-Stufe 1–22
     pub compression_level: i32,
+    /// wie [`DbConfig::secure_delete`](crate::DbConfig::secure_delete)
+    pub secure_delete: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,7 +107,7 @@ impl History {
             }
         }
         let _ = std::fs::remove_dir_all(view_dir(&config));
-        let current = Database::open_store(&config.path)?;
+        let current = Database::open_store(&config.path, config.secure_delete)?;
         let history = Self {
             inner: Arc::new(Inner { current: RwLock::new(Some(current)), compressing: AtomicBool::new(false), view: Mutex::new(None), config }),
         };
@@ -127,7 +129,7 @@ impl History {
 
     /// Flows und Aggregate der Live-Datenbank `live` vor `cutoff` übernehmen (blockierend). Rückgabe: Anzahl Flows.
     pub(crate) fn absorb(&self, live: &Path, cutoff: i64) -> Result<usize> {
-        let conn = schema::open_connection(live)?;
+        let conn = schema::open_connection(live, self.inner.config.secure_delete)?;
         conn.execute("ATTACH DATABASE ?1 AS hist", [self.inner.config.path.to_string_lossy()])?;
         let result = absorb_attached(&conn, cutoff);
         let _ = conn.execute_batch("DETACH DATABASE hist");
@@ -172,7 +174,7 @@ impl History {
         }
         let result = (|| -> Result<()> {
             let moved_until = {
-                let conn = schema::open_connection(&config.path)?;
+                let conn = schema::open_connection(&config.path, config.secure_delete)?;
                 let moved: Option<i64> = conn.query_row("SELECT value FROM meta WHERE key = 'moved_until'", [], |r| r.get(0)).optional()?;
                 // Alles aus dem WAL in die Hauptdatei, danach ohne WAL: das Archiv ist dann genau eine Datei
                 conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
@@ -183,9 +185,9 @@ impl History {
             for suffix in ["-wal", "-shm"] {
                 let _ = std::fs::remove_file(with_suffix(&config.path, suffix));
             }
-            let fresh = Database::open_store(&config.path)?;
+            let fresh = Database::open_store(&config.path, config.secure_delete)?;
             if let Some(moved) = moved_until {
-                let conn = schema::open_connection(&config.path)?;
+                let conn = fresh.connect()?;
                 set_moved_until(&conn, "main", moved)?;
             }
             *self.inner.current.write().expect("Historie-Lock") = Some(fresh);
@@ -193,7 +195,7 @@ impl History {
         })();
         if result.is_err() && self.inner.current.read().expect("Historie-Lock").is_none() {
             // Rotation gescheitert: mit der bisherigen Datei weitermachen
-            if let Ok(db) = Database::open_store(&config.path) {
+            if let Ok(db) = Database::open_store(&config.path, config.secure_delete) {
                 *self.inner.current.write().expect("Historie-Lock") = Some(db);
             }
         }
@@ -329,7 +331,7 @@ impl History {
             let started = Instant::now();
             let config = &history.inner.config;
             let target = view_path(config, &name);
-            let state = match decompress(&config.archive_dir.join(&name), &target).and_then(|_| Database::open_store(&target)) {
+            let state = match decompress(&config.archive_dir.join(&name), &target).and_then(|_| Database::open_view(&target)) {
                 Ok(db) => {
                     tracing::info!(archive = %name, secs = started.elapsed().as_secs(), "Archiv entpackt");
                     ViewState::Ready(db)
@@ -399,8 +401,8 @@ fn absorb_attached(conn: &Connection, cutoff: i64) -> Result<usize> {
         let hi = ((lo.div_euclid(MOVE_CHUNK_MS) + 1) * MOVE_CHUNK_MS).min(cutoff);
         let tx = conn.unchecked_transaction()?;
         total += tx.execute(
-            "INSERT INTO hist.flows (ts, start_ts, bucket, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, in_if, out_if, exporter, dir)
-             SELECT ts, start_ts, bucket, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, in_if, out_if, exporter, dir
+            "INSERT INTO hist.flows (ts, start_ts, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, in_if, out_if, exporter, dir)
+             SELECT ts, start_ts, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, in_if, out_if, exporter, dir
              FROM main.flows WHERE ts >= ?1 AND ts < ?2",
             params![lo, hi],
         )?;

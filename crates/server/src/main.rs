@@ -84,11 +84,13 @@ struct StorageSection {
     path: PathBuf,
     retention_hours: u64,
     cleanup_interval_secs: u64,
+    /// Gelöschte Flows in der Datei überschreiben (gilt auch für die Historie)
+    secure_delete: bool,
 }
 
 impl Default for StorageSection {
     fn default() -> Self {
-        Self { path: "data/flows.db".into(), retention_hours: 48, cleanup_interval_secs: 60 }
+        Self { path: "data/flows.db".into(), retention_hours: 48, cleanup_interval_secs: 60, secure_delete: true }
     }
 }
 
@@ -321,6 +323,7 @@ async fn main() -> Result<()> {
         path: config.storage.path.clone(),
         retention_hours: config.storage.retention_hours,
         cleanup_interval: Duration::from_secs(config.storage.cleanup_interval_secs.clamp(10, 3600)),
+        secure_delete: config.storage.secure_delete,
     })
     .context("Datenbank konnte nicht geöffnet werden")?;
     let history = if config.history.enabled {
@@ -331,6 +334,7 @@ async fn main() -> Result<()> {
             archive_dir: h.archive_dir.clone(),
             archive_retention: Duration::from_secs(h.archive_retention_days.clamp(1, 3650) * 86_400),
             compression_level: h.compression_level.clamp(1, 22),
+            secure_delete: config.storage.secure_delete,
         })
         .context("Historie konnte nicht geöffnet werden")?;
         tracing::info!(

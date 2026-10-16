@@ -41,6 +41,11 @@ path = "data/flows.db"
 retention_hours = 48
 # Wie oft abgelaufene Daten verschoben bzw. gelöscht werden.
 cleanup_interval_secs = 60
+# Gelöschte Flows in der Datei mit Nullen überschreiben (gilt auch für die Historie). Gründlich, aber teuer: jedes
+# Löschen schreibt die Seiten neu, danach werden WAL und freie Seiten bereinigt – das hält den Writer auf.
+# false = frei gewordener Platz wird von neuen Flows wiederverwendet (viel weniger Schreibarbeit, gelöschte Inhalte
+# bleiben aber bis dahin in der Datei lesbar).
+secure_delete = true
 
 [history]
 # Flows nach dem Live-Fenster in eine eigene Datenbank übernehmen. false = löschen (keine Historie, kein Archiv).

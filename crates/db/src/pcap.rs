@@ -1,7 +1,7 @@
 //! Gespeicherte PCAP-Analysen. Die Capture-Datei selbst wird nie gespeichert, nur das Analyse-Ergebnis – und das
 //! unterliegt derselben Retention wie die Flows.
 
-use crate::{Database, Result, schema};
+use crate::{Database, Result};
 use model::now_ms;
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
@@ -19,9 +19,9 @@ pub struct PcapSummary {
 impl Database {
     /// Analyse-Ergebnis (JSON) speichern; liefert die neue ID.
     pub async fn save_pcap(&self, name: String, size: u64, packets: u64, bytes: u64, result: String) -> Result<i64> {
-        let path = self.inner.path.clone();
+        let db = self.clone();
         tokio::task::spawn_blocking(move || -> Result<i64> {
-            let conn = schema::open_connection(&path)?;
+            let conn = db.connect()?;
             conn.execute(
                 "INSERT INTO pcap_analyses (created_ms, name, size, packets, bytes, result) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![now_ms(), name, size as i64, packets as i64, bytes as i64, result],
@@ -59,9 +59,9 @@ impl Database {
 
     /// Analyse löschen; `false`, wenn es sie nicht gab.
     pub async fn delete_pcap(&self, id: i64) -> Result<bool> {
-        let path = self.inner.path.clone();
+        let db = self.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
-            let conn = schema::open_connection(&path)?;
+            let conn = db.connect()?;
             Ok(conn.execute("DELETE FROM pcap_analyses WHERE id = ?1", params![id])? > 0)
         })
         .await?

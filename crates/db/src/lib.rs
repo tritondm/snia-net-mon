@@ -3,13 +3,14 @@
 //! * **Ingestion:** ein eigener Writer-Thread nimmt Flow-Batches aus einem Kanal und schreibt sie in großen Transaktionen
 //!   mit vorbereitetem Statement. Staut sich etwas an, fasst er alle wartenden Batches zu einer Transaktion zusammen
 //!   (natürliches Batching: je höher die Last, desto größer die Transaktionen).
-//! * **Partitionierung:** jeder Datensatz trägt seinen Stunden-Bucket (`bucket = ts / 1h`), Abfragen und Löschungen
-//!   laufen über den Zeitindex.
+//! * **Zeitindex:** Abfragen und Löschungen laufen über den Index auf `ts`.
 //! * **Retention:** die Live-Datenbank hält höchstens 72 Stunden ([`model::MAX_RETENTION_HOURS`]), Standard 48. Ein
 //!   Hintergrund-Task entfernt ältere Datensätze in Blöcken – mit aktivierter [`History`] werden sie vorher in die
-//!   Historien-Datenbank verschoben. `secure_delete` überschreibt gelöschte Inhalte in der Datei, danach werden WAL
-//!   (Checkpoint + Truncate) und freie Seiten (`incremental_vacuum`) bereinigt. Zusätzlich liefert keine Abfrage auf
-//!   die Live-Datenbank Daten, die älter als das Retention-Fenster sind.
+//!   Historien-Datenbank verschoben. Mit `secure_delete` (Konfiguration) werden gelöschte Inhalte in der Datei
+//!   überschrieben und danach WAL (Checkpoint + Truncate) und freie Seiten (`incremental_vacuum`) bereinigt. Ohne
+//!   werden die frei gewordenen Seiten einfach von neuen Flows wiederverwendet – deutlich weniger Schreibarbeit, die
+//!   Datei bleibt auf ihrer Höchstgröße. Zusätzlich liefert keine Abfrage auf die Live-Datenbank Daten, die älter als
+//!   das Retention-Fenster sind.
 //! * **Historie und Archiv:** siehe [`history`].
 //! * **Voraggregation:** Summen je Minute und Stunde (siehe [`rollup`]) machen die Dashboard-Statistiken unabhängig von
 //!   der Zahl der Flows schnell; sie unterliegen derselben Retention.
@@ -67,6 +68,9 @@ pub struct DbConfig {
     /// Aufbewahrung in Stunden; wird auf höchstens [`MAX_RETENTION_HOURS`] begrenzt.
     pub retention_hours: u64,
     pub cleanup_interval: Duration,
+    /// Gelöschte Inhalte in der Datei überschreiben (`PRAGMA secure_delete`) und WAL/freie Seiten nach jedem Löschen
+    /// bereinigen – gründlich, aber teuer.
+    pub secure_delete: bool,
 }
 
 #[derive(Debug, Default)]
@@ -105,6 +109,7 @@ struct Inner {
     /// Grenze der letzten Verschiebung in die Historie (Unix-ms, 0 = noch keine). Alles davor liegt in der Historie.
     moved_until: AtomicI64,
     cleanup_interval: Duration,
+    secure_delete: bool,
     readers: Mutex<Vec<Connection>>,
     counters: Counters,
     /// Aggregate für Statistiken nutzen (in Tests abschaltbar, um gegen die Rohdaten zu vergleichen)
@@ -120,36 +125,46 @@ impl Database {
         if retention_hours != config.retention_hours {
             tracing::warn!(requested = config.retention_hours, used = retention_hours, "Retention auf 1–72 Stunden begrenzt");
         }
-        let conn = schema::open_connection(&config.path)?;
-        schema::migrate(&conn)?;
+        let conn = schema::open_connection(&config.path, config.secure_delete)?;
+        schema::migrate(&conn, true)?;
         // Schätzung über die Zeilen-IDs statt COUNT(*): zwei Indexzugriffe statt eines Scans über viele GB, der das
         // Öffnen auf langsamen Platten minutenlang blockiert. Lücken entstehen nur, wo Flows außer der ts-Reihenfolge
         // gelöscht wurden – für die Statusanzeige genau genug.
         let rows: i64 = conn.query_row("SELECT COALESCE(MAX(id) - MIN(id) + 1, 0) FROM flows", [], |r| r.get(0))?;
-        let db = Self::new(&config.path, Some((retention_hours as i64 * HOUR_MS, retention_hours)), config.cleanup_interval);
+        let db = Self::new(&config.path, Some((retention_hours as i64 * HOUR_MS, retention_hours)), config.cleanup_interval, config.secure_delete);
         db.inner.counters.rows.store(rows, Relaxed);
         Ok(db)
     }
 
-    /// Unbegrenzten Speicher öffnen (Historie, entpacktes Archiv): gleiches Schema, keine Retention, kein Zeilenzähler
-    /// (ein `COUNT(*)` über viele GB würde das Öffnen minutenlang blockieren).
-    pub fn open_store(path: &Path) -> Result<Self> {
+    /// Unbegrenzten Speicher öffnen (Historie): gleiches Schema, keine Retention, kein Zeilenzähler (ein `COUNT(*)` über
+    /// viele GB würde das Öffnen minutenlang blockieren).
+    pub fn open_store(path: &Path, secure_delete: bool) -> Result<Self> {
+        Self::open_unbounded(path, secure_delete, true)
+    }
+
+    /// Entpacktes Archiv öffnen – nur zum Lesen, ohne Schema-Umstellungen, die die ganze Datei neu schreiben würden.
+    pub(crate) fn open_view(path: &Path) -> Result<Self> {
+        Self::open_unbounded(path, false, false)
+    }
+
+    fn open_unbounded(path: &Path, secure_delete: bool, writable: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = schema::open_connection(path)?;
-        schema::migrate(&conn)?;
+        let conn = schema::open_connection(path, secure_delete)?;
+        schema::migrate(&conn, writable)?;
         schema::create_meta(&conn)?;
-        Ok(Self::new(path, None, Duration::from_secs(60)))
+        Ok(Self::new(path, None, Duration::from_secs(60), secure_delete))
     }
 
-    fn new(path: &Path, retention: Option<(i64, u64)>, cleanup_interval: Duration) -> Self {
+    fn new(path: &Path, retention: Option<(i64, u64)>, cleanup_interval: Duration, secure_delete: bool) -> Self {
         Self {
             inner: Arc::new(Inner {
                 path: path.to_path_buf(),
                 retention,
                 moved_until: AtomicI64::new(0),
                 cleanup_interval,
+                secure_delete,
                 readers: Mutex::new(Vec::new()),
                 counters: Counters::default(),
                 rollups: AtomicBool::new(true),
@@ -159,6 +174,11 @@ impl Database {
 
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    /// Neue Verbindung mit den Pragmas dieses Speichers.
+    pub(crate) fn connect(&self) -> rusqlite::Result<Connection> {
+        schema::open_connection(&self.inner.path, self.inner.secure_delete)
     }
 
     pub fn retention_ms(&self) -> i64 {
@@ -185,7 +205,7 @@ impl Database {
 
     /// Writer-Thread starten. Er läuft, bis alle Sender des Kanals geschlossen sind, und schreibt dann den Rest weg.
     pub fn spawn_writer(&self, mut rx: mpsc::Receiver<Arc<Vec<FlowRecord>>>) -> Result<std::thread::JoinHandle<()>> {
-        let mut conn = schema::open_connection(&self.inner.path)?;
+        let mut conn = self.connect()?;
         let db = self.clone();
         let handle = std::thread::Builder::new().name("db-writer".into()).spawn(move || {
             let mut pending: Vec<Arc<Vec<FlowRecord>>> = Vec::new();
@@ -285,7 +305,7 @@ impl Database {
     pub async fn cleanup_before(&self, cutoff_ms: i64) -> Result<usize> {
         let db = self.clone();
         tokio::task::spawn_blocking(move || -> Result<usize> {
-            let conn = schema::open_connection(&db.inner.path)?;
+            let conn = db.connect()?;
             let mut total = 0usize;
             loop {
                 let deleted = conn.execute(
@@ -307,9 +327,19 @@ impl Database {
                 tracing::info!(deleted = pcaps, "Retention: alte PCAP-Analysen gelöscht");
             }
             if total > 0 || pcaps > 0 {
-                // Freie Seiten zurückgeben und gelöschte Inhalte auch aus dem WAL entfernen
-                conn.execute_batch("PRAGMA incremental_vacuum;")?;
-                conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+                if db.inner.secure_delete {
+                    // Freie Seiten zurückgeben und gelöschte Inhalte auch aus dem WAL entfernen
+                    conn.execute_batch("PRAGMA incremental_vacuum;")?;
+                    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+                } else {
+                    // Freie Seiten nutzt der Writer wieder; nur zurückgeben, wenn auffällig viele brachliegen (z. B. nach
+                    // Verkürzen der Retention). Den WAL leert der automatische Checkpoint.
+                    let (pages, free): (i64, i64) =
+                        conn.query_row("SELECT * FROM pragma_page_count(), pragma_freelist_count()", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                    if free > pages / 4 {
+                        conn.execute_batch("PRAGMA incremental_vacuum;")?;
+                    }
+                }
                 let c = &db.inner.counters;
                 c.deleted.fetch_add(total as u64, Relaxed);
                 c.rows.fetch_sub(total as i64, Relaxed);
@@ -347,7 +377,7 @@ impl Database {
         tokio::task::spawn_blocking(move || {
             let conn = match db.inner.readers.lock().expect("Pool-Mutex").pop() {
                 Some(conn) => conn,
-                None => schema::open_connection(&db.inner.path)?,
+                None => db.connect()?,
             };
             let result = f(&conn);
             let mut pool = db.inner.readers.lock().expect("Pool-Mutex");
@@ -372,14 +402,13 @@ fn insert_batches(conn: &mut Connection, batches: &[Arc<Vec<FlowRecord>>]) -> Re
     let mut sums = rollup::Rollup::default();
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO flows (ts, start_ts, bucket, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, in_if, out_if, exporter, dir)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO flows (ts, start_ts, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, in_if, out_if, exporter, dir)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?;
         for flow in batches.iter().flat_map(|b| b.iter()) {
             stmt.execute(params![
                 flow.ts_ms,
                 flow.start_ms,
-                flow.ts_ms.div_euclid(HOUR_MS),
                 &ip_to_bytes(flow.src_ip)[..],
                 &ip_to_bytes(flow.dst_ip)[..],
                 flow.src_port,

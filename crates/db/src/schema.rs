@@ -2,22 +2,27 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::time::Duration;
 
-/// Verbindung mit den Pragmas öffnen, die jede Verbindung braucht.
-pub(crate) fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
+/// Verbindung mit den Pragmas öffnen, die jede Verbindung braucht. `secure_delete`: gelöschte Inhalte in der Datei
+/// überschreiben (kostet beim Löschen viel Schreibarbeit, siehe `storage.secure_delete`).
+pub(crate) fn open_connection(path: &Path, secure_delete: bool) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(10))?;
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;      -- im WAL-Modus sicher gegen Korruption, nur die letzten ms können bei Stromausfall fehlen
-         PRAGMA secure_delete = ON;        -- gelöschte Inhalte werden in der Datei überschrieben
+         PRAGMA secure_delete = {};
+         PRAGMA journal_size_limit = 67108864; -- WAL nach einem Checkpoint auf höchstens 64 MiB kürzen
          PRAGMA temp_store = MEMORY;
          PRAGMA cache_size = -65536;       -- 64 MiB Seiten-Cache pro Verbindung
          PRAGMA mmap_size = 268435456;",
-    )?;
+        if secure_delete { "ON" } else { "OFF" }
+    ))?;
     Ok(conn)
 }
 
-pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+/// Schema anlegen bzw. aktualisieren. `writable = false` für entpackte Archive: dort wird nie geschrieben, das
+/// Entfernen der Spalte `bucket` (schreibt die ganze Tabelle neu) wird übersprungen.
+pub(crate) fn migrate(conn: &Connection, writable: bool) -> rusqlite::Result<()> {
     create(conn)?;
     // Dateien aus der ersten Version haben noch keine Richtungs-Spalte
     let has_dir: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('flows') WHERE name = 'dir'", [], |r| r.get::<_, i64>(0))? > 0;
@@ -37,6 +42,31 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             return Err(err);
         }
         tracing::info!(ms = started.elapsed().as_millis() as u64, "Aggregat-Tabellen angelegt");
+    }
+    // Version 3: Spalte `bucket` (nie abgefragt) und Index auf dst_port (vom Port-Filter `src_port = ? OR dst_port = ?`
+    // nie genutzt) entfallen – ein B-Baum und eine Spalte weniger pro Insert
+    if version < 3 && writable {
+        let has_bucket: bool =
+            conn.query_row("SELECT COUNT(*) FROM pragma_table_info('flows') WHERE name = 'bucket'", [], |r| r.get::<_, i64>(0))? > 0;
+        let started = std::time::Instant::now();
+        if has_bucket {
+            tracing::info!("Datenbank wird umgestellt (Spalte bucket entfällt) – bei großen Dateien dauert das einige Minuten");
+        }
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            conn.execute_batch("DROP INDEX IF EXISTS idx_flows_dport_ts;")?;
+            if has_bucket {
+                conn.execute_batch("ALTER TABLE flows DROP COLUMN bucket;")?;
+            }
+            conn.execute_batch("PRAGMA user_version = 3; COMMIT")
+        })();
+        if let Err(err) = result {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(err);
+        }
+        if has_bucket {
+            tracing::info!(ms = started.elapsed().as_millis() as u64, "Datenbank umgestellt");
+        }
     }
     Ok(())
 }
@@ -58,7 +88,6 @@ fn create(conn: &Connection) -> rusqlite::Result<()> {
              id        INTEGER PRIMARY KEY,
              ts        INTEGER NOT NULL,   -- Flow-Ende, Unix-ms
              start_ts  INTEGER NOT NULL,   -- Flow-Beginn, Unix-ms
-             bucket    INTEGER NOT NULL,   -- Stunden-Partition: ts / 3600000
              src_ip    BLOB    NOT NULL,   -- 16 Byte, IPv4 als IPv4-mapped IPv6
              dst_ip    BLOB    NOT NULL,
              src_port  INTEGER NOT NULL,
@@ -75,7 +104,6 @@ fn create(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_flows_ts       ON flows (ts);
          CREATE INDEX IF NOT EXISTS idx_flows_src_ts   ON flows (src_ip, ts);
          CREATE INDEX IF NOT EXISTS idx_flows_dst_ts   ON flows (dst_ip, ts);
-         CREATE INDEX IF NOT EXISTS idx_flows_dport_ts ON flows (dst_port, ts);
          CREATE TABLE IF NOT EXISTS pcap_analyses (
              id         INTEGER PRIMARY KEY,
              created_ms INTEGER NOT NULL,   -- Zeitpunkt der Analyse, Unix-ms (Grundlage der Retention)
