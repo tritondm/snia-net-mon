@@ -124,7 +124,9 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `collector.listen` | `0.0.0.0:2055` | Empfang von NetFlow/IPFIX |
 | `collector.workers` | `2` | parallele Empfangs-Sockets (`SO_REUSEPORT`) |
 | `network.exclude_networks` | leer | Netze, deren Verkehr komplett ignoriert wird (siehe oben) |
+| `storage.path` | `data/flows.db` | Live-Datenbank |
 | `storage.retention_hours` | `48` | Live-Fenster; Werte über 72 werden auf 72 begrenzt |
+| `storage.secure_delete` | `true` | gelöschte Flows in der Datei überschreiben (gilt auch für die Historie), siehe [Speicher](#speicher-sqlite) |
 | `history.enabled` | `true` | Flows nach dem Live-Fenster in die Historie übernehmen (`false` = löschen) |
 | `history.max_size_gb` | `50` | ab dieser Größe wird die Historie ins Archiv rotiert |
 | `history.archive_dir` | `data/archive` | Ablage der Archive (`flows_<von>_<bis>.db.zst`, UTC) |
@@ -208,7 +210,8 @@ Snia-Net-Mon/
 - **Backpressure:** Flows gehen gebündelt per `try_send` an Datenbank und Live-Ansicht. Ist ein Abnehmer voll, werden Flows
   gezählt verworfen (`dropped_flows`), der UDP-Empfang blockiert nie.
 - **Schreiben:** Ein eigener Thread schreibt mit vorbereitetem Statement. Unter Last fasst er alle wartenden Batches zu einer
-  Transaktion zusammen (bis 50.000 Zeilen).
+  Transaktion zusammen (bis 50.000 Zeilen). Ist die Datenbank länger als das Busy-Timeout gesperrt, versucht er es erneut,
+  statt die Flows zu verwerfen.
 - **Live:** Ein Snapshot pro Sekunde wird einmal serialisiert und an alle Clients geteilt. Die Top-150-Auswahl läuft in O(n).
 
 Gemessen (Release-Build, ein Desktop-Rechner, 4 Exporter): **1.000.000 Flows in 10 s (100.000 Flows/s) ohne Verluste und
@@ -238,10 +241,40 @@ Lastprobe mit 1 h bei 1.000 Flows/s (3,6 Mio. Flows, 60 Geräte, 20.000 Gegenste
 | Protokolle / Richtungen | 0,7 s | 0,01 s |
 | Sankey / Gegenstellen | 4,9 s | 1,7 s |
 
-Schreiben: 135.000 Flows/s. Die Aggregate brauchen zusätzlich Platz. Wie viel, hängt davon ab, wie oft dieselben Paare
+Schreiben: rund 140.000 Flows/s (siehe [Speicher](#speicher-sqlite)). Die Aggregate brauchen zusätzlich Platz. Wie viel, hängt davon ab, wie oft dieselben Paare
 wiederkehren: bei diesen Testdaten mit sehr vielen einmaligen Gegenstellen rund die Hälfte der Rohdaten, im Heimnetz mit
 immer denselben Diensten deutlich weniger. Nachmessen: `cargo test -p db --release -- --ignored bench --nocapture`
 (Anzahl per `BENCH_FLOWS`).
+
+### Speicher (SQLite)
+
+Live-Datenbank und Historie sind SQLite-Dateien im WAL-Modus. Leser und Writer laufen parallel, geschrieben wird nur
+vom Writer-Thread und vom Retention-Task.
+
+- **Tabelle `flows`:** eine Zeile pro Flow, IPs als 16 Byte (IPv4 als IPv4-mapped IPv6), damit IPv4 und IPv6 in denselben
+  Indizes und CIDR-Filter als einfache `BETWEEN`-Bereiche funktionieren.
+- **Indizes:** nur die, die Abfragen wirklich nutzen. Das sind `ts` (Zeitfenster, Retention), `src_ip, ts` und `dst_ip, ts`
+  (IP-/CIDR-Filter). Jeder Index kostet bei jedem Insert und jedem Löschen einen weiteren B-Baum. Der frühere Index auf
+  `dst_port` und die Spalte `bucket` sind deshalb entfallen: Der Port-Filter (`src_port = ? OR dst_port = ?`) konnte den
+  Index ohnehin nicht nutzen, `bucket` wurde nie abgefragt.
+- **Umstellung:** Eine bestehende Datei wird beim ersten Start einmalig umgebaut (Schema-Version 3, Log „Datenbank
+  umgestellt“). SQLite schreibt dafür die ganze Tabelle neu. Bei großen Dateien dauert das einige Minuten und braucht
+  vorübergehend so viel freien Platz wie die Datei. Entpackte Archive werden nur gelesen und nicht umgebaut.
+- **`storage.secure_delete`:**
+  - `true` (Standard): Gelöschte Seiten werden in der Datei mit Nullen überschrieben. Danach werden der WAL geleert
+    (`wal_checkpoint(TRUNCATE)`) und die freien Seiten an das Dateisystem zurückgegeben (`incremental_vacuum`). Gelöschte
+    Verbindungsdaten sind damit auch mit Werkzeugen nicht mehr aus der Datei zu holen.
+  - `false`: Frei gewordene Seiten bleiben in der Datei und werden von neuen Flows wiederverwendet. Die Datei bleibt auf
+    ihrer Höchstgröße, der WAL wird vom automatischen Checkpoint auf höchstens 64 MiB gekürzt. Nur wenn mehr als ein
+    Viertel der Datei brachliegt (z. B. nach Verkürzen der Retention), wird sie verkleinert. Weniger Schreibarbeit, aber
+    gelöschte Inhalte bleiben lesbar, bis sie überschrieben werden.
+
+Gemessen (Release-Build, NVMe, 2 Mio. Flows mit Aggregaten): **140.000 Flows/s** statt 115.000 vor dem Wegfall von
+Index und Spalte, die Datei ist rund 8 % kleiner. Beim Löschen macht `secure_delete` auf einer schnellen SSD kaum einen
+Unterschied (1,5 Mio. Flows in 40 Schritten: 17,3 s mit, 16,7 s ohne). Teuer ist dort das `DELETE` selbst, weil jede Zeile
+auch aus den IP-Indizes entfernt werden muss. Auf langsamen Platten (HDD, SD-Karte) spart `false` deutlich mehr.
+Nachmessen: `cargo test -p db --release -- --ignored bench_cleanup --nocapture` (Anzahl per `BENCH_FLOWS`; für echte
+Plattenwerte `TMPDIR` auf die Zielplatte setzen, `/tmp` ist oft eine RAM-Disk).
 
 ### Aufbewahrung (live → Historie → Archiv)
 
@@ -253,8 +286,8 @@ flows.db (live, 48 h) ──jede Minute──▶ history.db ──ab 50 GB──
   arbeiten nur hier.
 - **Verschieben:** Der Retention-Task läuft beim Start und danach jede Minute. Er kopiert alle Flows vor der
   minutengenauen Grenze samt Minuten-Aggregaten in `history.db` (in Schritten zu 10 Minuten) und berechnet dort die
-  Stunden-Aggregate neu. Erst danach löscht er sie in der Live-Datenbank (`secure_delete`, `wal_checkpoint(TRUNCATE)`,
-  `incremental_vacuum`). Die erreichte Grenze steht in derselben Transaktion in `meta.moved_until` der Historie: Bricht
+  Stunden-Aggregate neu. Erst danach löscht er sie in der Live-Datenbank, in Blöcken zu 5.000 Zeilen, damit der Writer
+  nie lange warten muss (mit `secure_delete` samt Überschreiben, siehe [Speicher](#speicher-sqlite)). Die erreichte Grenze steht in derselben Transaktion in `meta.moved_until` der Historie: Bricht
   der Prozess dazwischen ab, wird nichts doppelt kopiert. Scheitert das Kopieren (z. B. Platte voll), löscht der Task
   trotzdem alles über 72 h – die Live-Datenbank wächst nie unbegrenzt.
 - **Rotation:** Erreicht die Historie `max_size_gb` (Datei + WAL), wird sie geschlossen, in `history.db.rotating`
@@ -274,7 +307,8 @@ flows.db (live, 48 h) ──jede Minute──▶ history.db ──ab 50 GB──
   sofort entfernt – auch bei Fehlern; Reste nach einem Absturz räumt der nächste Start weg.
 
 **Datenschutz:** Verbindungsdaten sind personenbezogen. Mit Historie und Archiv werden sie bis zu drei Monate (plus die
-Zeit bis zur Rotation) aufbewahrt – das sollte zur internen Richtlinie bzw. Betriebsvereinbarung passen. Kleine Netze
+Zeit bis zur Rotation) aufbewahrt – das sollte zur internen Richtlinie bzw. Betriebsvereinbarung passen. Muss
+nachweisbar sein, dass gelöschte Flows auch physisch aus den Dateien verschwinden, `storage.secure_delete = true` lassen. Kleine Netze
 erreichen 50 GB eventuell nie; dann bleibt die Historie so lange liegen, bis sie voll ist. `max_size_gb` entsprechend
 wählen.
 
@@ -316,7 +350,8 @@ Mailversand oder wenn `max_mails_per_hour` erreicht ist.
 ## Entwicklung
 
 ```bash
-cargo test --workspace              # Parser-Roundtrips (v9/IPFIX), Fuzz-artige Robustheit, Retention, Historie/Archiv, Upload-Alarm, Filter, PCAP/pcapng-Leser, App-Regeln, GeoIP
+cargo test --workspace              # Parser-Roundtrips (v9/IPFIX), Fuzz-artige Robustheit, Retention, Historie/Archiv, Schema-Umstellung, Upload-Alarm, Filter, PCAP/pcapng-Leser, App-Regeln, GeoIP
+cargo test -p db --release -- --ignored bench --nocapture   # Lastproben: Statistiken mit/ohne Aggregate, Schreiben + Retention mit/ohne secure_delete
 cargo clippy --workspace --all-targets
 cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (:8080), Hot Reload
 ```
@@ -324,12 +359,13 @@ cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (
 ## Grenzen & nächste Schritte
 
 - **Skalierung:** Mit den Aggregaten bleiben die Statistiken auch bei ~1.000 Flows/s schnell. Grenze ist dann eher der
-  Platz: 48 h Rohdaten bei 1.000 Flows/s sind ~33 GB, die Historie füllt 50 GB dann in gut drei Tagen. Für sehr hohe
-  Raten wären DuckDB/ClickHouse der nächste Schritt; die Schnittstelle des `db`-Crates ist dafür ausgelegt.
+  Platz: 48 h Rohdaten bei 1.000 Flows/s sind ~30 GB, die Historie füllt 50 GB dann in gut drei Tagen.
+- **Löschen und Verschieben** kosten bei SQLite Schreibarbeit proportional zur Datenmenge (jede Zeile wird aus Tabelle
+  und Indizes entfernt bzw. in die Historie kopiert). Geplanter nächster Schritt ist **DuckDB** (eingebettet, MIT-Lizenz)
+  mit stündlichen **Parquet**-Dateien: Retention und Historie werden zu Dateioperationen, spaltenweise Kompression
+  spart Platz, und Archive lassen sich ohne Entpacken abfragen. Die Schnittstelle des `db`-Crates ist dafür ausgelegt.
 - **Archive ansehen** braucht so viel freien Platz wie die entpackte Historie und dauert bei 50 GB einige Minuten.
   Kleinere `max_size_gb` ergeben kleinere, schneller geöffnete Archive.
-- **Partitionierung:** Jeder Datensatz trägt seinen Stunden-Bucket, gelöscht wird über den Zeitindex. Echte Stunden-Tabellen
-  mit `DROP TABLE` wären bei sehr großen Datenmengen schneller.
 - **NetFlow v5 / sFlow** werden nicht unterstützt, softflowd kann v9/IPFIX.
 - **Zeitstempel:** Flows werden nach ihrem Ende (`ts`) einsortiert. Lange Flows erscheinen im Durchsatz-Chart daher als Spitze
   zum Exportzeitpunkt, wie bei NetFlow üblich.
