@@ -2,11 +2,11 @@
 
 Netzwerkmonitor für eine **pfSense-Firewall**. Er sammelt Verbindungsdaten per **NetFlow v9 / IPFIX**, zeigt sie live im Browser – mit
 **GeoIP (Land, ASN)** für jede externe Gegenstelle – und macht sie durchsuchbar. Dazu kommt eine **PCAP-Analyse** für
-Mitschnitte (pcap/pcapng). Die Live-Datenbank hält die letzten **48 Stunden**. Ältere Flows wandern in eine
-**Historie**, die ab 50 GB in ein **zstd-Archiv** rotiert wird. Archive bleiben **3 Monate** und lassen sich in der Web-UI
-wieder ansehen. Große Uploads (> 1 GiB in einer Verbindung) melden sich **per Mail bei den Admins**.
+Mitschnitte (pcap/pcapng). Die Live-Daten umfassen die letzten **48 Stunden**, gespeichert als eine SQLite-Datei pro
+Stunde. Ältere Stunden wandern in eine **Historie**, die ab 50 GB in ein **zstd-Archiv** rotiert wird. Archive bleiben
+**3 Monate** und lassen sich in der Web-UI wieder ansehen. Große Uploads (> 1 GiB in einer Verbindung) melden sich **per Mail bei den Admins**.
 
-- **Backend:** Rust (Tokio, Axum), SQLite im WAL-Modus
+- **Backend:** Rust (Tokio, Axum), SQLite im WAL-Modus, eine Datei pro Stunde
 - **Frontend:** Svelte 5 + Tailwind, Catppuccin-Mocha-Theme im Hyprland-Look (Frosted Glass, Verlaufskanten, Monospace)
 - **Status:** Prototyp – funktionsfähig und getestet, siehe [Grenzen & nächste Schritte](#grenzen--nächste-schritte)
 
@@ -19,7 +19,7 @@ wieder ansehen. Große Uploads (> 1 GiB in einer Verbindung) melden sich **per M
 | **Dashboard** (`#dashboard`) | Live-Durchsatz getrennt nach **Download ↓ und Upload ↑** (gespiegelter Chart) per WebSocket, Verkehrsrichtung im Zeitfenster, Tabelle der aktiven Verbindungen mit Richtung (einfrierbar, filterbar). **Bereich im Durchsatz-Chart mit der Maus markieren** hält Chart und Tabelle an und zeigt die Verbindungen genau dieses Zeitraums (Klick oder Esc = zurück zu live), Top Talker, Top Ports, **Länder und Netze (ASN)** der Gegenstellen, Protokollverteilung, Sankey-Diagramm Quelle → Dienst → Ziel. Alle Statistiken lassen sich nach Richtung filtern |
 | **Flow-Suche** (`#flows`) | Filter nach IP **oder CIDR** (Quelle/Ziel/beides), Port, Protokoll, Richtung, Zeitfenster; CSV-Export. Darunter die **Top Talker grafisch** mit ihren stärksten Gegenstellen (Dienst, gesendet/empfangen). Klick auf eine IP im Dashboard springt direkt hierher |
 | **PCAP** (`#pcap`) | Capture-Datei (pcap/pcapng, z. B. aus *Diagnostics → Packet Capture*) per Drag & Drop hochladen: Kennzahlen, Zeitverlauf, Protokolle, **Anwendungen** (YouTube, Microsoft 365, CDN, AI … über TLS-SNI, DNS, HTTP-Host, IP-Präfixe), **Endpunkte mit Land und ASN**, Länder, Top Quellen/Ports/Flows, DNS, HTTP, TCP-Flags und heuristische **Auffälligkeiten** (Portscan, NXDOMAIN-Häufung, DNS/HTTP auf Nicht-Standard-Ports). Verlauf der Analysen; Klick auf eine IP sucht sie in den NetFlow-Daten |
-| **Archiv** (`#archive`) | Füllstand der Historie, Liste der Archive mit Zeitraum, Größe und Löschdatum. **Historie oder ein Archiv durchsuchen**: öffnet die Flow-Suche mit dieser Datenquelle (Archive werden dafür im Hintergrund entpackt) |
+| **Archiv** (`#archive`) | Füllstand der Historie, Liste der Archive mit Zeitraum, Größe und Löschdatum. **Historie oder ein Archiv durchsuchen**: öffnet die Flow-Suche mit dieser Datenquelle (aus Archiven wird nur entpackt, was eine Abfrage braucht) |
 | **GeoIP** | Land, Organisation und ASN für alle öffentlichen IPs – in der Live-Tabelle, Flow-Suche (auch CSV), Top Talker, Sankey und PCAP-Analyse |
 | **Aufbewahrung** | live 48 h (höchstens 72 h) → Historie bis 50 GB → zstd-Archiv, gelöscht 90 Tage nach dem jüngsten Flow; siehe [Aufbewahrung](#aufbewahrung-live--historie--archiv). PCAP-Analysen folgen dem Live-Fenster, die hochgeladene Datei selbst wird direkt nach der Analyse gelöscht |
 | **Ausgenommene Netze** | `network.exclude_networks`: Verkehr von oder zu diesen Netzen wird beim Empfang verworfen – nicht gespeichert, nicht angezeigt, nicht gezählt |
@@ -124,12 +124,13 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `collector.listen` | `0.0.0.0:2055` | Empfang von NetFlow/IPFIX |
 | `collector.workers` | `2` | parallele Empfangs-Sockets (`SO_REUSEPORT`) |
 | `network.exclude_networks` | leer | Netze, deren Verkehr komplett ignoriert wird (siehe oben) |
-| `storage.path` | `data/flows.db` | Live-Datenbank |
+| `storage.dir` | `data/live` | Live-Daten: `index.db` und eine Datei pro Stunde, siehe [Speicher](#speicher-eine-sqlite-datei-pro-stunde) |
 | `storage.retention_hours` | `48` | Live-Fenster; Werte über 72 werden auf 72 begrenzt |
-| `storage.secure_delete` | `true` | gelöschte Flows in der Datei überschreiben (gilt auch für die Historie), siehe [Speicher](#speicher-sqlite) |
-| `history.enabled` | `true` | Flows nach dem Live-Fenster in die Historie übernehmen (`false` = löschen) |
+| `storage.secure_delete` | `true` | gelöschte Daten überschreiben (gilt auch für die Historie), siehe [Speicher](#speicher-eine-sqlite-datei-pro-stunde) |
+| `history.enabled` | `true` | Stunden nach dem Live-Fenster in die Historie verschieben (`false` = löschen) |
+| `history.dir` | `data/history` | Verzeichnis der Historie (gleicher Aufbau wie `storage.dir`) |
 | `history.max_size_gb` | `50` | ab dieser Größe wird die Historie ins Archiv rotiert |
-| `history.archive_dir` | `data/archive` | Ablage der Archive (`flows_<von>_<bis>.db.zst`, UTC) |
+| `history.archive_dir` | `data/archive` | Ablage der Archive (Ordner `flows_<von>_<bis>/`, UTC, jede Datei einzeln gepackt) |
 | `history.archive_retention_days` | `90` | Archive werden so lange nach ihrem jüngsten Flow aufbewahrt |
 | `history.compression_level` | `19` | zstd-Stufe 1–22 |
 | `alerts.upload_threshold_mb` | `1024` | Upload-Alarm ab dieser Menge je Verbindung, `0` = aus |
@@ -150,11 +151,11 @@ Mailversand prüfen: `snia-net-mon --test-mail [config.toml]` schickt eine Test-
 ## Architektur
 
 ```text
-pfSense (softflowd) ──UDP 2055──▶ collector ──Batches──┬──▶ db: Writer-Thread ──▶ flows.db (live, 48 h)
-                                  (n Worker,            │        Retention-Task ──▶ history.db ──50 GB──▶ archive/*.db.zst
+pfSense (softflowd) ──UDP 2055──▶ collector ──Batches──┬──▶ db: Writer-Thread ──▶ live/ (index.db + Datei je Stunde, 48 h)
+                                  (n Worker,            │        Retention-Task ──▶ history/ ──50 GB──▶ archive/flows_<von>_<bis>/
                                    SO_REUSEPORT,        ├──▶ api::LiveHub ──1×/s──▶ WebSocket ──▶ Browser
                                    exclude_networks)    └──▶ alert: Upload je Verbindung > 1 GiB ──SMTP──▶ Admins
-Browser ──REST──▶ api (Axum) ──▶ db (live, Historie oder entpacktes Archiv) ──▶ geo (Land/ASN je IP, beim Ausliefern)
+Browser ──REST──▶ api (Axum) ──▶ db (live, Historie oder geöffnetes Archiv) ──▶ geo (Land/ASN je IP, beim Ausliefern)
 Browser ──PCAP-Upload──▶ api ──▶ pcap (Analyse im Blocking-Thread) ──▶ db (Ergebnis als JSON, 48 h)
 ```
 
@@ -170,9 +171,10 @@ Snia-Net-Mon/
 │   │   ├── metrics.rs         lock-freie Zähler
 │   │   └── synth.rs           Encoder + Verkehrsmodell (Tests, flowgen)
 │   ├── db/
-│   │   ├── lib.rs             Writer-Thread, Lese-Pool, Retention-Task (verschieben oder löschen)
-│   │   ├── history.rs         Historie, Rotation, zstd-Archive, Entpacken zum Ansehen
-│   │   ├── schema.rs          Tabellen, Indizes, Pragmas, Migrationen
+│   │   ├── lib.rs             Writer-Thread (je Stunde eine Datei), Lese-Pool, Retention-Task (verschieben oder löschen)
+│   │   ├── store.rs           Stundendateien: Namen, Anhängen, Abschließen, Verschieben, Löschen
+│   │   ├── history.rs         Historie, Rotation, zstd-Archive, Entpacken bei Bedarf
+│   │   ├── schema.rs          Tabellen, Indizes, Pragmas
 │   │   ├── rollup.rs          Minuten-/Stunden-Aggregate, Zerlegung der Zeitfenster
 │   │   ├── query.rs           Suche, Top Talker/Ports/Protokolle, Verbindungen, Gegenstellen, Zeitreihe, Sankey
 │   │   └── pcap.rs            gespeicherte PCAP-Analysen
@@ -209,8 +211,8 @@ Snia-Net-Mon/
   Feld dekodiert.
 - **Backpressure:** Flows gehen gebündelt per `try_send` an Datenbank und Live-Ansicht. Ist ein Abnehmer voll, werden Flows
   gezählt verworfen (`dropped_flows`), der UDP-Empfang blockiert nie.
-- **Schreiben:** Ein eigener Thread schreibt mit vorbereitetem Statement. Unter Last fasst er alle wartenden Batches zu einer
-  Transaktion zusammen (bis 50.000 Zeilen). Ist die Datenbank länger als das Busy-Timeout gesperrt, versucht er es erneut,
+- **Schreiben:** Ein eigener Thread schreibt mit vorbereitetem Statement in die Datei der jeweiligen Stunde. Unter Last
+  fasst er alle wartenden Batches zu einer Transaktion zusammen (bis 50.000 Zeilen). Ist die Datenbank länger als das Busy-Timeout gesperrt, versucht er es erneut,
   statt die Flows zu verwerfen.
 - **Live:** Ein Snapshot pro Sekunde wird einmal serialisiert und an alle Clients geteilt. Die Top-150-Auswahl läuft in O(n).
 
@@ -222,15 +224,15 @@ ohne Parse-Fehler**.
 Der Writer schreibt in derselben Transaktion wie die Flows Summen **je Minute und je Stunde**: pro IP, pro Dienst
 (Protokoll + Dienst-Port) und pro Paar Quelle → Ziel je Dienst, jeweils mit Richtung. Eine Statistik-Abfrage zerlegt ihr
 Zeitfenster in volle Stunden, volle Minuten und die Ränder darunter. Nur die Ränder (unter einer Minute) kommen aus den
-Einzel-Flows. Das Ergebnis ist **exakt dasselbe** wie über die Rohdaten (per Test gegen die Rohdaten geprüft).
+Einzel-Flows der Stundendateien. Das Ergebnis ist **exakt dasselbe** wie über die Rohdaten (per Test gegen die Rohdaten
+geprüft).
 
 - Aus den Aggregaten kommen: Top Talker, Länder/ASN, Top Ports, Protokolle, Richtungen, Zeitreihe, Sankey und die
   Gegenstellen der Flow-Suche – solange nur Zeitfenster und Richtung gefiltert werden.
 - Mit IP-, Port- oder Protokollfilter sowie für Einzel-Flows und 5-Tupel-Verbindungen (markierter Bereich) wird wie bisher
   über die Rohdaten gesucht. Dafür gibt es Indizes, diese Abfragen betreffen nur einen kleinen Ausschnitt.
-- Eine bestehende Datenbank bekommt die Aggregate beim ersten Start einmalig nachberechnet (Log: „Aggregat-Tabellen
-  angelegt“). Bei einer großen Datei kann das einige Minuten dauern.
-- Die Aggregate wandern mit den Flows in Historie und Archiv, Statistiken dort sind genauso schnell.
+- Die Aggregate liegen in `index.db` und wandern mit den Flows in Historie und Archiv, Statistiken dort sind genauso
+  schnell.
 
 Lastprobe mit 1 h bei 1.000 Flows/s (3,6 Mio. Flows, 60 Geräte, 20.000 Gegenstellen), Zeitfenster 1 h, Release-Build:
 
@@ -241,74 +243,101 @@ Lastprobe mit 1 h bei 1.000 Flows/s (3,6 Mio. Flows, 60 Geräte, 20.000 Gegenste
 | Protokolle / Richtungen | 0,7 s | 0,01 s |
 | Sankey / Gegenstellen | 4,9 s | 1,7 s |
 
-Schreiben: rund 140.000 Flows/s (siehe [Speicher](#speicher-sqlite)). Die Aggregate brauchen zusätzlich Platz. Wie viel, hängt davon ab, wie oft dieselben Paare
+Schreiben: rund 130.000 Flows/s. Die Aggregate brauchen zusätzlich Platz. Wie viel, hängt davon ab, wie oft dieselben Paare
 wiederkehren: bei diesen Testdaten mit sehr vielen einmaligen Gegenstellen rund die Hälfte der Rohdaten, im Heimnetz mit
 immer denselben Diensten deutlich weniger. Nachmessen: `cargo test -p db --release -- --ignored bench --nocapture`
 (Anzahl per `BENCH_FLOWS`).
 
-### Speicher (SQLite)
+### Speicher: eine SQLite-Datei pro Stunde
 
-Live-Datenbank und Historie sind SQLite-Dateien im WAL-Modus. Leser und Writer laufen parallel, geschrieben wird nur
-vom Writer-Thread und vom Retention-Task.
+Live-Daten und Historie sind jeweils ein Verzeichnis:
 
-- **Tabelle `flows`:** eine Zeile pro Flow, IPs als 16 Byte (IPv4 als IPv4-mapped IPv6), damit IPv4 und IPv6 in denselben
-  Indizes und CIDR-Filter als einfache `BETWEEN`-Bereiche funktionieren.
-- **Indizes:** nur die, die Abfragen wirklich nutzen. Das sind `ts` (Zeitfenster, Retention), `src_ip, ts` und `dst_ip, ts`
-  (IP-/CIDR-Filter). Jeder Index kostet bei jedem Insert und jedem Löschen einen weiteren B-Baum. Der frühere Index auf
-  `dst_port` und die Spalte `bucket` sind deshalb entfallen: Der Port-Filter (`src_port = ? OR dst_port = ?`) konnte den
-  Index ohnehin nicht nutzen, `bucket` wurde nie abgefragt.
-- **Umstellung:** Eine bestehende Datei wird beim ersten Start einmalig umgebaut (Schema-Version 3, Log „Datenbank
-  umgestellt“). SQLite schreibt dafür die ganze Tabelle neu. Bei großen Dateien dauert das einige Minuten und braucht
-  vorübergehend so viel freien Platz wie die Datei. Entpackte Archive werden nur gelesen und nicht umgebaut.
+```text
+data/live/
+├── index.db                Aggregate (Minute/Stunde), PCAP-Analysen, Meta
+├── flows_20261016-13.db    Einzel-Flows mit Flow-Ende zwischen 13:00 und 14:00 UTC
+└── flows_20261016-14.db    aktuelle Stunde – nur in diese schreibt der Writer
+```
+
+Warum so: Bei einer einzigen großen Datei musste die Retention jede Minute Hunderttausende Zeilen per `DELETE` aus
+Tabelle und Indizes entfernen und zum Verschieben in die Historie zeilenweise kopieren. Das kostete Schreibarbeit
+proportional zur Datenmenge und sperrte zeitweise den Writer. Jetzt verschwinden alte Daten als ganze Datei
+(`rename` in die Historie oder Löschen). Das dauert unabhängig von der Datenmenge Millisekunden. Nur die kleinen
+Aggregat- und PCAP-Tabellen in `index.db` werden noch zeilenweise gelöscht.
+
+- **Schreiben:** Der Writer hängt die Datei der Stunde an seine Verbindung (`ATTACH`) und schreibt Flows und Aggregate in
+  einer Transaktion. Danach bleibt nur die neueste Stunde angehängt. Flows, deren Zeitstempel schon vor dem
+  Retention-Fenster liegt (z. B. bei falscher Uhr des Exporters), werden verworfen und unter `/api/status` als
+  `db.late_flows` gezählt.
+- **Lesen:** Eine Abfrage hängt die Stundendateien an, die ihr Zeitfenster berührt. Die Flow-Suche geht von der neuesten
+  Stunde rückwärts und hört auf, sobald das Limit erreicht ist. Statistiken kommen aus den Aggregaten, nur die Ränder
+  (unter einer Minute) aus den Stundendateien. Bis zu acht Dateien werden direkt angehängt (SQLite erlaubt zehn). Bei
+  mehr, etwa einer IP-Suche über die ganze Historie, werden die Treffer je Datei vorsummiert in einer temporären Tabelle
+  gesammelt. Flow-IDs setzen sich aus Stunde und Zeilennummer zusammen und sind dadurch über alle Dateien eindeutig.
+- **Verschieben:** Eine Stundendatei wird erst angefasst, wenn sie ganz vor dem Fenster liegt. Dann wird sie
+  abgeschlossen (WAL zurückgeschrieben, Rollback-Journal statt WAL) und ist genau eine Datei. Laufende Abfragen halten
+  eine Lese-Sperre, das Verschieben wartet darauf. Der Writer schreibt mit zehn Minuten Abstand zur Grenze nicht mehr
+  in solche Stunden.
+- **Indizes** je Stundendatei: `ts` (Zeitfenster), `src_ip, ts` und `dst_ip, ts` (IP-/CIDR-Filter). IPs sind 16 Byte
+  (IPv4 als IPv4-mapped IPv6), damit IPv4 und IPv6 in denselben Indizes und CIDR-Filter als einfache `BETWEEN`-Bereiche
+  funktionieren.
 - **`storage.secure_delete`:**
-  - `true` (Standard): Gelöschte Seiten werden in der Datei mit Nullen überschrieben. Danach werden der WAL geleert
-    (`wal_checkpoint(TRUNCATE)`) und die freien Seiten an das Dateisystem zurückgegeben (`incremental_vacuum`). Gelöschte
-    Verbindungsdaten sind damit auch mit Werkzeugen nicht mehr aus der Datei zu holen.
-  - `false`: Frei gewordene Seiten bleiben in der Datei und werden von neuen Flows wiederverwendet. Die Datei bleibt auf
-    ihrer Höchstgröße, der WAL wird vom automatischen Checkpoint auf höchstens 64 MiB gekürzt. Nur wenn mehr als ein
-    Viertel der Datei brachliegt (z. B. nach Verkürzen der Retention), wird sie verkleinert. Weniger Schreibarbeit, aber
-    gelöschte Inhalte bleiben lesbar, bis sie überschrieben werden.
+  - `true` (Standard): Gelöschte Stundendateien werden vor dem Entfernen mit Nullen überschrieben. In `index.db`
+    überschreibt SQLite gelöschte Seiten (`PRAGMA secure_delete`), danach werden WAL und freie Seiten bereinigt. Auf
+    SSDs und Dateisystemen mit Copy-on-Write (btrfs, ZFS) landen die Nullen allerdings nicht zwingend auf denselben
+    Blöcken. Dort hilft nur Verschlüsselung des Datenträgers.
+  - `false`: Dateien werden einfach gelöscht, freie Seiten in `index.db` wiederverwendet.
 
-Gemessen (Release-Build, NVMe, 2 Mio. Flows mit Aggregaten): **140.000 Flows/s** statt 115.000 vor dem Wegfall von
-Index und Spalte, die Datei ist rund 8 % kleiner. Beim Löschen macht `secure_delete` auf einer schnellen SSD kaum einen
-Unterschied (1,5 Mio. Flows in 40 Schritten: 17,3 s mit, 16,7 s ohne). Teuer ist dort das `DELETE` selbst, weil jede Zeile
-auch aus den IP-Indizes entfernt werden muss. Auf langsamen Platten (HDD, SD-Karte) spart `false` deutlich mehr.
-Nachmessen: `cargo test -p db --release -- --ignored bench_cleanup --nocapture` (Anzahl per `BENCH_FLOWS`; für echte
-Plattenwerte `TMPDIR` auf die Zielplatte setzen, `/tmp` ist oft eine RAM-Disk).
+Gemessen (Release-Build, NVMe, 2 Mio. Flows mit Aggregaten, je ein Lauf):
+
+| | eine Datei (vorher) | Datei pro Stunde |
+|---|---|---|
+| Schreiben | 128.000 Flows/s | 131.000 Flows/s |
+| Retention | 1 Mio. Flows in 9,5 s (40 `DELETE`-Schritte) | 2 Mio. Flows in 1,0 s (zwei Dateien, inkl. Überschreiben) |
+| Top Talker / Länder (1 h, Aggregate) | 0,33 s | 0,25 s |
+| Top Ports / Protokolle (1 h, Aggregate) | 12 / 7 ms | 11 / 6 ms |
+| Sankey / Gegenstellen (1 h, Aggregate) | 1,0 s | 1,0 s |
+
+Nachmessen: `cargo test -p db --release -- --ignored bench --nocapture --test-threads=1` (Anzahl per `BENCH_FLOWS`; für
+echte Plattenwerte `TMPDIR` auf die Zielplatte setzen, `/tmp` ist oft eine RAM-Disk).
 
 ### Aufbewahrung (live → Historie → Archiv)
 
 ```text
-flows.db (live, 48 h) ──jede Minute──▶ history.db ──ab 50 GB──▶ archive/flows_<von>_<bis>.db.zst ──90 Tage──▶ gelöscht
+live/ (48 h) ──jede volle Stunde──▶ history/ ──ab 50 GB──▶ archive/flows_<von>_<bis>/ ──90 Tage──▶ gelöscht
 ```
 
 - **Live:** höchstens 72 h (`model::MAX_RETENTION_HOURS`, fest einkompiliert), Standard 48 h. Dashboard und Live-Ansicht
-  arbeiten nur hier.
-- **Verschieben:** Der Retention-Task läuft beim Start und danach jede Minute. Er kopiert alle Flows vor der
-  minutengenauen Grenze samt Minuten-Aggregaten in `history.db` (in Schritten zu 10 Minuten) und berechnet dort die
-  Stunden-Aggregate neu. Erst danach löscht er sie in der Live-Datenbank, in Blöcken zu 5.000 Zeilen, damit der Writer
-  nie lange warten muss (mit `secure_delete` samt Überschreiben, siehe [Speicher](#speicher-sqlite)). Die erreichte Grenze steht in derselben Transaktion in `meta.moved_until` der Historie: Bricht
-  der Prozess dazwischen ab, wird nichts doppelt kopiert. Scheitert das Kopieren (z. B. Platte voll), löscht der Task
-  trotzdem alles über 72 h – die Live-Datenbank wächst nie unbegrenzt.
-- **Rotation:** Erreicht die Historie `max_size_gb` (Datei + WAL), wird sie geschlossen, in `history.db.rotating`
-  umbenannt und durch eine leere ersetzt. Ein eigener Thread komprimiert sie mit **zstd** (Stufe 19, Long-Distance-
-  Matching, halbe Kernzahl als Threads) nach `archive_dir`. Flow-Datenbanken schrumpfen dabei typischerweise auf ein
-  Sechstel (Testdaten: 13,6 MB → 2,1 MB). Bricht der Prozess ab, setzt der nächste Start die Komprimierung fort.
-- **Archive:** Dateiname = Zeitraum (UTC) des ältesten und jüngsten Flows. Gelöscht wird `archive_retention_days` nach
+  arbeiten nur hier. Abfragen schneiden minutengenau ab. Auf der Platte bleibt eine Stunde liegen, bis sie ganz vor dem
+  Fenster liegt, also bis zu 49 h.
+- **Verschieben:** Der Retention-Task läuft beim Start und danach jede Minute. Liegt eine Stunde ganz vor dem Fenster,
+  kopiert er ihre Minuten-Aggregate in die `index.db` der Historie, berechnet dort die Stunden-Aggregate neu und
+  verschiebt dann die Stundendatei per `rename` (liegt die Historie auf einem anderen Dateisystem: kopieren und löschen).
+  Die erreichte Grenze steht in derselben Transaktion in `meta.moved_until` der Historie. Bricht der Prozess dazwischen
+  ab, verschiebt der nächste Lauf die übrigen Dateien, ohne Aggregate doppelt zu zählen. Scheitert das Verschieben
+  (z. B. Platte voll), löscht der Task trotzdem alles über 72 h – die Live-Daten wachsen nie unbegrenzt.
+- **Ohne Historie** (`history.enabled = false`) werden die Stundendateien gelöscht. Die harte 72-h-Grenze gilt dabei auch
+  innerhalb einer Stunde: Der ältere Teil der Grenzstunde wird zeilenweise gelöscht.
+- **Rotation:** Erreicht das Verzeichnis der Historie `max_size_gb`, wird es in `history.rotating` umbenannt und durch ein
+  leeres ersetzt. Ein eigener Thread packt jede Datei einzeln mit **zstd** (Stufe 19, Long-Distance-Matching, halbe
+  Kernzahl als Threads) in einen Ordner unter `archive_dir`. Eine Stundendatei schrumpft dabei typischerweise auf ein
+  Sechstel bis Siebtel (flowgen-Testdaten: 8,2 MB → 1,1 MB). Bricht der Prozess ab, setzt der nächste Start die
+  Komprimierung fort.
+- **Archive:** Ordnername = Zeitraum (UTC) des ältesten und jüngsten Flows. Gelöscht wird `archive_retention_days` nach
   dem jüngsten Flow.
-- **Ansehen:** Im Workspace **archiv** ein Archiv öffnen: Es wird nach `archive_dir/.view/` entpackt (braucht so viel
-  Platz wie die ursprüngliche Historie, bei 50 GB also 50 GB und einige Minuten). Danach lässt es sich in der Flow-Suche
-  wie die Live-Daten durchsuchen, inklusive Top Talker und CSV-Export. Es ist immer nur ein Archiv entpackt; nach 30 Minuten
-  ohne Abfrage wird es wieder gelöscht.
-- **Ohne Historie** (`history.enabled = false`) gilt das bisherige Verhalten: Flows werden nach dem Live-Fenster
-  unwiderruflich gelöscht.
+- **Ansehen:** Im Workspace **archiv** ein Archiv öffnen. Dabei wird nur `index.db` nach `archive_dir/.view/` entpackt,
+  Top Talker, Länder und andere Statistiken sind danach sofort abfragbar. Eine Stundendatei wird erst entpackt, wenn
+  eine Abfrage sie braucht. Die Flow-Suche (neueste zuerst) kommt meist mit den letzten Stunden des Archivs aus, eine
+  IP-Suche über den ganzen Zeitraum entpackt dagegen alles. Es ist immer nur ein Archiv geöffnet; nach 30 Minuten ohne
+  Abfrage wird das Entpackte wieder gelöscht.
 - PCAP-Analysen (sie enthalten IPs, Domains und URLs) werden nach dem Live-Fenster gelöscht und nicht archiviert.
   Hochgeladene Capture-Dateien liegen nur während der Analyse als temporäre Datei in `pcap.upload_dir` und werden danach
   sofort entfernt – auch bei Fehlern; Reste nach einem Absturz räumt der nächste Start weg.
 
 **Datenschutz:** Verbindungsdaten sind personenbezogen. Mit Historie und Archiv werden sie bis zu drei Monate (plus die
 Zeit bis zur Rotation) aufbewahrt – das sollte zur internen Richtlinie bzw. Betriebsvereinbarung passen. Muss
-nachweisbar sein, dass gelöschte Flows auch physisch aus den Dateien verschwinden, `storage.secure_delete = true` lassen. Kleine Netze
+nachweisbar sein, dass gelöschte Flows auch physisch verschwinden, `storage.secure_delete = true` lassen und den
+Datenträger verschlüsseln (siehe [Speicher](#speicher-eine-sqlite-datei-pro-stunde)). Kleine Netze
 erreichen 50 GB eventuell nie; dann bleibt die Historie so lange liegen, bis sie voll ist. `max_size_gb` entsprechend
 wählen.
 
@@ -331,7 +360,7 @@ Mailversand oder wenn `max_mails_per_hour` erreicht ist.
 
 | Methode | Pfad | Beschreibung |
 |---|---|---|
-| GET | `/api/status` | Collector-Zähler (inkl. `excluded_flows`), DB-Statistik, Live-Fenster, Historie, GeoIP-Status |
+| GET | `/api/status` | Collector-Zähler (inkl. `excluded_flows`), DB-Statistik (inkl. `late_flows`), Live-Fenster, Historie, GeoIP-Status |
 | GET | `/api/flows` | Flow-Suche (mit `src_geo`/`dst_geo`). Parameter: `source` (`live` Standard, `history`, `archive:<name>` – gilt für alle `/flows`- und `/stats`-Endpunkte), `from`, `to` (Unix-ms), `ip`, `src`, `dst` (IP/CIDR), `port`, `proto`, `dir` (`in`/`out`/`internal`/`external`), `limit` (≤ 5000) |
 | GET | `/api/stats/talkers` · `/ports` · `/protocols` | Aggregationen, gleiche Filterparameter |
 | GET | `/api/stats/directions` | Bytes, Pakete, Flows und ø Bandbreite je Richtung |
@@ -342,7 +371,7 @@ Mailversand oder wenn `max_mails_per_hour` erreicht ist.
 | GET | `/api/stats/sankey` | Knoten/Kanten Quelle → Dienst → Ziel, `limit` = Anzahl Verbindungen |
 | WS | `/api/live` | beim Verbinden `{"type":"history"}`, danach jede Sekunde `{"type":"tick"}` mit Rate (gesamt, `bytes_in`, `bytes_out`), aktiven Verbindungen inkl. Richtung, Zählern und GeoIP |
 | GET | `/api/archives` | Historie (Größe, Zeitraum, `compressing`) und Archive mit `state` (`packed`, `unpacking`, `ready`, `failed`) |
-| POST | `/api/archives/{name}/open` | Archiv im Hintergrund entpacken, danach mit `source=archive:{name}` abfragbar |
+| POST | `/api/archives/{name}/open` | Archiv öffnen (`index.db` im Hintergrund entpacken), danach mit `source=archive:{name}` abfragbar; Stundendateien entpackt die jeweilige Abfrage |
 | POST | `/api/pcap?name=datei.pcap` | Capture-Datei als Rohdaten im Body (`curl --data-binary @datei.pcap`), liefert das Analyse-Ergebnis mit `id` |
 | GET | `/api/pcap` · `/api/pcap/{id}` | Verlauf der Analysen / gespeichertes Ergebnis |
 | DELETE | `/api/pcap/{id}` | Analyse löschen |
@@ -350,8 +379,8 @@ Mailversand oder wenn `max_mails_per_hour` erreicht ist.
 ## Entwicklung
 
 ```bash
-cargo test --workspace              # Parser-Roundtrips (v9/IPFIX), Fuzz-artige Robustheit, Retention, Historie/Archiv, Schema-Umstellung, Upload-Alarm, Filter, PCAP/pcapng-Leser, App-Regeln, GeoIP
-cargo test -p db --release -- --ignored bench --nocapture   # Lastproben: Statistiken mit/ohne Aggregate, Schreiben + Retention mit/ohne secure_delete
+cargo test --workspace              # Parser-Roundtrips (v9/IPFIX), Fuzz-artige Robustheit, Retention, Historie/Archiv, Stundendateien, Upload-Alarm, Filter, PCAP/pcapng-Leser, App-Regeln, GeoIP
+cargo test -p db --release -- --ignored bench --nocapture --test-threads=1   # Lastproben: Statistiken mit/ohne Aggregate, Schreiben + Retention
 cargo clippy --workspace --all-targets
 cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (:8080), Hot Reload
 ```
@@ -360,12 +389,12 @@ cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (
 
 - **Skalierung:** Mit den Aggregaten bleiben die Statistiken auch bei ~1.000 Flows/s schnell. Grenze ist dann eher der
   Platz: 48 h Rohdaten bei 1.000 Flows/s sind ~30 GB, die Historie füllt 50 GB dann in gut drei Tagen.
-- **Löschen und Verschieben** kosten bei SQLite Schreibarbeit proportional zur Datenmenge (jede Zeile wird aus Tabelle
-  und Indizes entfernt bzw. in die Historie kopiert). Geplanter nächster Schritt ist **DuckDB** (eingebettet, MIT-Lizenz)
-  mit stündlichen **Parquet**-Dateien: Retention und Historie werden zu Dateioperationen, spaltenweise Kompression
-  spart Platz, und Archive lassen sich ohne Entpacken abfragen. Die Schnittstelle des `db`-Crates ist dafür ausgelegt.
-- **Archive ansehen** braucht so viel freien Platz wie die entpackte Historie und dauert bei 50 GB einige Minuten.
-  Kleinere `max_size_gb` ergeben kleinere, schneller geöffnete Archive.
+- **Platz:** SQLite speichert zeilenweise, unkomprimiert. Wird der Platz knapp, wäre **DuckDB** mit **Parquet**-Dateien
+  (spaltenweise, komprimiert, Archive ohne Entpacken abfragbar) der nächste Schritt. Der Aufbau mit einer Datei pro
+  Stunde passt bereits dazu.
+- **Abfragen über sehr viele Stunden** mit IP-, Port- oder Protokollfilter (z. B. eine IP über drei Monate Historie)
+  öffnen jede Stundendatei einzeln und dauern entsprechend. In einem Archiv entpacken sie zudem alle Stunden und
+  brauchen dann so viel freien Platz wie die ursprüngliche Historie.
 - **NetFlow v5 / sFlow** werden nicht unterstützt, softflowd kann v9/IPFIX.
 - **Zeitstempel:** Flows werden nach ihrem Ende (`ts`) einsortiert. Lange Flows erscheinen im Durchsatz-Chart daher als Spitze
   zum Exportzeitpunkt, wie bei NetFlow üblich.
