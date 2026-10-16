@@ -81,7 +81,8 @@ impl Default for CollectorSection {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct StorageSection {
-    path: PathBuf,
+    /// Verzeichnis der Live-Daten (`index.db` und eine Datei pro Stunde)
+    dir: PathBuf,
     retention_hours: u64,
     cleanup_interval_secs: u64,
     /// Gelöschte Flows in der Datei überschreiben (gilt auch für die Historie)
@@ -90,7 +91,7 @@ struct StorageSection {
 
 impl Default for StorageSection {
     fn default() -> Self {
-        Self { path: "data/flows.db".into(), retention_hours: 48, cleanup_interval_secs: 60, secure_delete: true }
+        Self { dir: "data/live".into(), retention_hours: 48, cleanup_interval_secs: 60, secure_delete: true }
     }
 }
 
@@ -100,7 +101,7 @@ impl Default for StorageSection {
 struct HistorySection {
     /// `false` = Flows nach dem Live-Fenster löschen (Verhalten ohne Historie)
     enabled: bool,
-    path: PathBuf,
+    dir: PathBuf,
     max_size_gb: f64,
     archive_dir: PathBuf,
     archive_retention_days: u64,
@@ -111,7 +112,7 @@ impl Default for HistorySection {
     fn default() -> Self {
         Self {
             enabled: true,
-            path: "data/history.db".into(),
+            dir: "data/history".into(),
             max_size_gb: 50.0,
             archive_dir: "data/archive".into(),
             archive_retention_days: 90,
@@ -320,7 +321,7 @@ async fn main() -> Result<()> {
 
     // --- Speicher
     let database = db::Database::open(&db::DbConfig {
-        path: config.storage.path.clone(),
+        dir: config.storage.dir.clone(),
         retention_hours: config.storage.retention_hours,
         cleanup_interval: Duration::from_secs(config.storage.cleanup_interval_secs.clamp(10, 3600)),
         secure_delete: config.storage.secure_delete,
@@ -329,7 +330,7 @@ async fn main() -> Result<()> {
     let history = if config.history.enabled {
         let h = &config.history;
         let history = db::History::open(db::HistoryConfig {
-            path: h.path.clone(),
+            dir: h.dir.clone(),
             max_bytes: (h.max_size_gb.max(0.01) * 1024.0 * 1024.0 * 1024.0) as u64,
             archive_dir: h.archive_dir.clone(),
             archive_retention: Duration::from_secs(h.archive_retention_days.clamp(1, 3650) * 86_400),

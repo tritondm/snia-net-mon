@@ -1,8 +1,9 @@
 //! Lese-Abfragen: Flow-Suche und Aggregationen für die Dashboard-Widgets.
 
-use crate::rollup::{self, Kind, Level};
-use crate::{Database, DbError, Result};
+use crate::rollup::{self, HOUR_MS, Kind, Level, RawPart, Source};
+use crate::{Database, DbError, Result, store};
 use model::{Direction, cidr_range, ip_from_bytes, now_ms, proto_name};
+use rusqlite::Connection;
 use rusqlite::types::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -26,6 +27,7 @@ pub struct FlowFilter {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FlowRow {
+    /// Eindeutig über alle Stundendateien: Stunde (seit 1970) in den oberen, Zeilen-ID in den unteren 32 Bit
     pub id: i64,
     pub ts: i64,
     pub start_ts: i64,
@@ -162,10 +164,17 @@ struct Plan {
 }
 
 impl Plan {
-    fn source(&self, kind: Kind) -> (String, Vec<Value>) {
+    /// Datenquelle für `kind`: Aggregate und/oder Einzel-Flows aus den Stundendateien.
+    fn source<'c>(&self, conn: &'c Connection, db: &Database, kind: Kind) -> Result<Source<'c>> {
         match &self.rollup {
-            Some((segments, dir)) => rollup::source(kind, segments, *dir),
-            None => rollup::raw_source(kind, &self.w.sql, &self.w.params),
+            Some((segments, dir)) => {
+                let (sql, params, raw) = rollup::source(kind, segments, *dir);
+                Source::build(conn, db, kind, sql, params, &raw)
+            }
+            None => {
+                let part = RawPart { lo: self.w.from, hi: self.w.to + 1, cond: self.w.sql.clone(), params: self.w.params.clone() };
+                Source::build(conn, db, kind, Vec::new(), Vec::new(), &[part])
+            }
         }
     }
 
@@ -244,34 +253,47 @@ impl Database {
     /// Flows suchen (neueste zuerst).
     pub async fn query_flows(&self, filter: FlowFilter) -> Result<Vec<FlowRow>> {
         let w = self.build_where(&filter)?;
-        let limit = filter.limit.unwrap_or(500).clamp(1, 5000) as i64;
-        self.with_reader(move |conn| {
-            let sql = format!(
-                "SELECT id, ts, start_ts, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, exporter, dir
-                 FROM flows WHERE {} ORDER BY ts DESC LIMIT {limit}",
-                w.sql
-            );
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
-                let proto: u8 = r.get(7)?;
-                Ok(FlowRow {
-                    id: r.get(0)?,
-                    ts: r.get(1)?,
-                    start_ts: r.get(2)?,
-                    src_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(3)?).to_string(),
-                    dst_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(4)?).to_string(),
-                    src_port: r.get(5)?,
-                    dst_port: r.get(6)?,
-                    proto,
-                    proto_name: proto_name(proto),
-                    bytes: r.get(8)?,
-                    packets: r.get(9)?,
-                    tcp_flags: r.get(10)?,
-                    exporter: ip_from_bytes(&r.get::<_, Vec<u8>>(11)?).to_string(),
-                    direction: Direction::from_u8(r.get(12)?),
-                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let limit = filter.limit.unwrap_or(500).clamp(1, 5000) as usize;
+        self.with_reader(move |conn, db| {
+            // Neueste Stunde zuerst – sobald das Limit erreicht ist, werden ältere Dateien gar nicht erst geöffnet
+            let mut out = Vec::new();
+            for hour in db.hours(w.from, w.to + 1)?.into_iter().rev() {
+                if out.len() >= limit {
+                    break;
+                }
+                let _f = store::attach(conn, &db.hour_path(hour)?, "f")?;
+                let sql = format!(
+                    "SELECT id, ts, start_ts, src_ip, dst_ip, src_port, dst_port, proto, bytes, packets, tcp_flags, exporter, dir
+                     FROM f.flows WHERE {} ORDER BY ts DESC LIMIT {}",
+                    w.sql,
+                    limit - out.len()
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let id_base = hour.div_euclid(HOUR_MS) << 32;
+                let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
+                    let proto: u8 = r.get(7)?;
+                    Ok(FlowRow {
+                        id: id_base + r.get::<_, i64>(0)?,
+                        ts: r.get(1)?,
+                        start_ts: r.get(2)?,
+                        src_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(3)?).to_string(),
+                        dst_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(4)?).to_string(),
+                        src_port: r.get(5)?,
+                        dst_port: r.get(6)?,
+                        proto,
+                        proto_name: proto_name(proto),
+                        bytes: r.get(8)?,
+                        packets: r.get(9)?,
+                        tcp_flags: r.get(10)?,
+                        exporter: ip_from_bytes(&r.get::<_, Vec<u8>>(11)?).to_string(),
+                        direction: Direction::from_u8(r.get(12)?),
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            Ok(out)
         })
         .await
     }
@@ -290,11 +312,12 @@ impl Database {
     async fn talkers(&self, filter: FlowFilter, limit: u32) -> Result<Vec<TalkerStat>> {
         let plan = self.plan(&filter, Level::Hour)?;
         let seconds = plan.seconds();
-        self.with_reader(move |conn| {
-            let (source, params) = plan.source(Kind::Ip);
+        self.with_reader(move |conn, db| {
+            let src = plan.source(conn, db, Kind::Ip)?;
+            let (source, params) = (&src.sql, &src.params);
             let sql = format!("SELECT ip, SUM(bytes), SUM(packets), SUM(flows) FROM ({source}) GROUP BY ip ORDER BY 2 DESC LIMIT {limit}");
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
                 let bytes: i64 = r.get(1)?;
                 Ok(TalkerStat {
                     ip: ip_from_bytes(&r.get::<_, Vec<u8>>(0)?).to_string(),
@@ -313,14 +336,15 @@ impl Database {
     pub async fn top_ports(&self, filter: FlowFilter) -> Result<Vec<PortStat>> {
         let plan = self.plan(&filter, Level::Hour)?;
         let limit = filter.limit.unwrap_or(10).clamp(1, 100) as i64;
-        self.with_reader(move |conn| {
-            let (source, params) = plan.source(Kind::Svc);
+        self.with_reader(move |conn, db| {
+            let src = plan.source(conn, db, Kind::Svc)?;
+            let (source, params) = (&src.sql, &src.params);
             let sql = format!(
                 "SELECT port, proto, SUM(bytes), SUM(flows) FROM ({source})
                  WHERE proto IN (6, 17, 132) GROUP BY port, proto ORDER BY 3 DESC LIMIT {limit}"
             );
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
                 let proto: u8 = r.get(1)?;
                 Ok(PortStat { port: r.get(0)?, proto, proto_name: proto_name(proto), bytes: r.get(2)?, flows: r.get(3)? })
             })?;
@@ -331,11 +355,12 @@ impl Database {
 
     pub async fn protocols(&self, filter: FlowFilter) -> Result<Vec<ProtocolStat>> {
         let plan = self.plan(&filter, Level::Hour)?;
-        self.with_reader(move |conn| {
-            let (source, params) = plan.source(Kind::Svc);
+        self.with_reader(move |conn, db| {
+            let src = plan.source(conn, db, Kind::Svc)?;
+            let (source, params) = (&src.sql, &src.params);
             let sql = format!("SELECT proto, SUM(bytes), SUM(packets), SUM(flows) FROM ({source}) GROUP BY proto ORDER BY 2 DESC");
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
                 let proto: u8 = r.get(0)?;
                 Ok(ProtocolStat { proto, proto_name: proto_name(proto), bytes: r.get(1)?, packets: r.get(2)?, flows: r.get(3)? })
             })?;
@@ -353,15 +378,16 @@ impl Database {
         let level = [Level::Hour, Level::Minute].into_iter().find(|l| step >= l.ms()).unwrap_or(Level::Raw);
         step = (step + level.ms() - 1) / level.ms() * level.ms();
         let plan = self.plan(&filter, level)?;
-        self.with_reader(move |conn| {
-            let (source, params) = plan.source(Kind::Svc);
+        self.with_reader(move |conn, db| {
+            let src = plan.source(conn, db, Kind::Svc)?;
+            let (source, params) = (&src.sql, &src.params);
             let sql = format!(
                 "SELECT (t / {step}) * {step} AS slot, SUM(bytes), SUM(packets), SUM(flows),
                         SUM(CASE WHEN dir = 1 THEN bytes ELSE 0 END), SUM(CASE WHEN dir = 2 THEN bytes ELSE 0 END)
                  FROM ({source}) GROUP BY slot ORDER BY slot"
             );
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
                 Ok(TimePoint { ts: r.get(0)?, bytes: r.get(1)?, packets: r.get(2)?, flows: r.get(3)?, bytes_in: r.get(4)?, bytes_out: r.get(5)? })
             })?;
             Ok((step, rows.collect::<rusqlite::Result<Vec<_>>>()?))
@@ -374,11 +400,12 @@ impl Database {
         let plan = self.plan(&filter, Level::Hour)?;
         let seconds = plan.seconds();
         let found = self
-            .with_reader(move |conn| {
-                let (source, params) = plan.source(Kind::Svc);
+            .with_reader(move |conn, db| {
+                let src = plan.source(conn, db, Kind::Svc)?;
+                let (source, params) = (&src.sql, &src.params);
                 let sql = format!("SELECT dir, SUM(bytes), SUM(packets), SUM(flows) FROM ({source}) GROUP BY dir");
-                let mut stmt = conn.prepare_cached(&sql)?;
-                let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
                     Ok((Direction::from_u8(r.get(0)?), r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
                 })?;
                 Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -402,14 +429,29 @@ impl Database {
     pub async fn connections(&self, filter: FlowFilter) -> Result<Vec<ConnectionStat>> {
         let w = self.build_where(&filter)?;
         let limit = filter.limit.unwrap_or(200).clamp(1, 2000) as i64;
-        self.with_reader(move |conn| {
-            let sql = format!(
-                "SELECT src_ip, dst_ip, src_port, dst_port, proto, MAX(dir), SUM(bytes), SUM(packets), COUNT(*), MIN(start_ts), MAX(ts)
-                 FROM flows WHERE {} GROUP BY src_ip, dst_ip, src_port, dst_port, proto ORDER BY 7 DESC LIMIT {limit}",
+        self.with_reader(move |conn, db| {
+            // Je Stundendatei vorsummieren, danach über alle Dateien zusammenfassen
+            conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS conn_part (src_ip BLOB, dst_ip BLOB, src_port INTEGER, dst_port INTEGER, proto INTEGER,
+                     dir INTEGER, bytes INTEGER, packets INTEGER, flows INTEGER, first_seen INTEGER, last_seen INTEGER);
+                 DELETE FROM temp.conn_part;",
+            )?;
+            let part = format!(
+                "INSERT INTO temp.conn_part
+                 SELECT src_ip, dst_ip, src_port, dst_port, proto, MAX(dir), SUM(bytes), SUM(packets), COUNT(*), MIN(start_ts), MAX(ts)
+                 FROM f.flows WHERE {} GROUP BY src_ip, dst_ip, src_port, dst_port, proto",
                 w.sql
             );
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(w.params.iter()), |r| {
+            for hour in db.hours(w.from, w.to + 1)? {
+                let _f = store::attach(conn, &db.hour_path(hour)?, "f")?;
+                conn.execute(&part, rusqlite::params_from_iter(w.params.iter()))?;
+            }
+            let sql = format!(
+                "SELECT src_ip, dst_ip, src_port, dst_port, proto, MAX(dir), SUM(bytes), SUM(packets), SUM(flows), MIN(first_seen), MAX(last_seen)
+                 FROM temp.conn_part GROUP BY src_ip, dst_ip, src_port, dst_port, proto ORDER BY 7 DESC LIMIT {limit}"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |r| {
                 let proto: u8 = r.get(4)?;
                 Ok(ConnectionStat {
                     src_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(0)?).to_string(),
@@ -435,14 +477,15 @@ impl Database {
     pub async fn peers(&self, filter: FlowFilter) -> Result<Vec<PeerStat>> {
         let plan = self.plan(&filter, Level::Hour)?;
         let limit = filter.limit.unwrap_or(200).clamp(1, 5000) as i64;
-        self.with_reader(move |conn| {
-            let (source, params) = plan.source(Kind::Pair);
+        self.with_reader(move |conn, db| {
+            let src = plan.source(conn, db, Kind::Pair)?;
+            let (source, params) = (&src.sql, &src.params);
             let sql = format!(
                 "SELECT src_ip, dst_ip, proto, port, SUM(bytes), SUM(packets), SUM(flows) FROM ({source})
                  GROUP BY src_ip, dst_ip, proto, port ORDER BY 5 DESC LIMIT {limit}"
             );
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
                 let proto: u8 = r.get(2)?;
                 Ok(PeerStat {
                     src_ip: ip_from_bytes(&r.get::<_, Vec<u8>>(0)?).to_string(),
@@ -465,14 +508,15 @@ impl Database {
         let plan = self.plan(&filter, Level::Hour)?;
         let limit = filter.limit.unwrap_or(25).clamp(1, 200) as i64;
         let rows = self
-            .with_reader(move |conn| {
-                let (source, params) = plan.source(Kind::Pair);
+            .with_reader(move |conn, db| {
+                let src = plan.source(conn, db, Kind::Pair)?;
+                let (source, params) = (&src.sql, &src.params);
                 let sql = format!(
                     "SELECT src_ip, proto, port, dst_ip, SUM(bytes) FROM ({source})
                      GROUP BY src_ip, proto, port, dst_ip ORDER BY 5 DESC LIMIT {limit}"
                 );
-                let mut stmt = conn.prepare_cached(&sql)?;
-                let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
                     Ok((
                         ip_from_bytes(&r.get::<_, Vec<u8>>(0)?).to_string(),
                         r.get::<_, u8>(1)?,

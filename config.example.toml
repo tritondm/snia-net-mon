@@ -35,23 +35,25 @@ workers = 2
 recv_buffer_mb = 16
 
 [storage]
-# Live-Datenbank: Dashboard, Live-Ansicht und Flow-Suche (Quelle "live").
-path = "data/flows.db"
-# Live-Fenster in Stunden – höchstens 72. Ältere Flows wandern in die Historie (oder werden gelöscht, siehe [history]).
+# Live-Daten: Dashboard, Live-Ansicht und Flow-Suche (Quelle "live"). Ein Verzeichnis mit index.db (Aggregate,
+# PCAP-Analysen) und einer SQLite-Datei pro Stunde (flows_JJJJMMTT-HH.db, UTC).
+dir = "data/live"
+# Live-Fenster in Stunden – höchstens 72. Ältere Stunden wandern in die Historie (oder werden gelöscht, siehe [history]).
 retention_hours = 48
 # Wie oft abgelaufene Daten verschoben bzw. gelöscht werden.
 cleanup_interval_secs = 60
-# Gelöschte Flows in der Datei mit Nullen überschreiben (gilt auch für die Historie). Gründlich, aber teuer: jedes
-# Löschen schreibt die Seiten neu, danach werden WAL und freie Seiten bereinigt – das hält den Writer auf.
-# false = frei gewordener Platz wird von neuen Flows wiederverwendet (viel weniger Schreibarbeit, gelöschte Inhalte
-# bleiben aber bis dahin in der Datei lesbar).
+# Gelöschte Daten überschreiben (gilt auch für die Historie): Stundendateien werden vor dem Löschen mit Nullen
+# überschrieben, in index.db gelöschte Aggregate und PCAP-Analysen per SQLite secure_delete. Auf SSDs und
+# Copy-on-Write-Dateisystemen (btrfs, ZFS) ist das Überschreiben ganzer Dateien nicht garantiert wirksam.
+# false = schneller, gelöschte Inhalte können aber auf der Platte wiederherstellbar bleiben.
 secure_delete = true
 
 [history]
-# Flows nach dem Live-Fenster in eine eigene Datenbank übernehmen. false = löschen (keine Historie, kein Archiv).
+# Stunden nach dem Live-Fenster in ein eigenes Verzeichnis verschieben. false = löschen (keine Historie, kein Archiv).
 enabled = true
-path = "data/history.db"
-# Erreicht die Historie diese Größe, wird sie als stark komprimiertes Archiv (zstd) abgelegt und neu begonnen.
+dir = "data/history"
+# Erreicht die Historie diese Größe, wird sie als stark komprimiertes Archiv (zstd, jede Datei einzeln) abgelegt und
+# neu begonnen.
 max_size_gb = 50
 archive_dir = "data/archive"
 # Archive werden so viele Tage nach ihrem jüngsten Flow automatisch gelöscht.

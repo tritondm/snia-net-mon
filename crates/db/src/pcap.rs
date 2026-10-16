@@ -34,7 +34,7 @@ impl Database {
     /// Analysen im Retention-Fenster, neueste zuerst.
     pub async fn list_pcaps(&self, limit: u32) -> Result<Vec<PcapSummary>> {
         let floor = self.retention_floor_ms();
-        self.with_reader(move |conn| {
+        self.with_reader(move |conn, _| {
             let mut stmt = conn.prepare_cached(
                 "SELECT id, created_ms, name, size, packets, bytes FROM pcap_analyses WHERE created_ms >= ?1 ORDER BY id DESC LIMIT ?2",
             )?;
@@ -49,7 +49,7 @@ impl Database {
     /// Gespeichertes Ergebnis als JSON-Text (`None`, wenn unbekannt oder abgelaufen).
     pub async fn get_pcap(&self, id: i64) -> Result<Option<String>> {
         let floor = self.retention_floor_ms();
-        self.with_reader(move |conn| {
+        self.with_reader(move |conn, _| {
             Ok(conn
                 .query_row("SELECT result FROM pcap_analyses WHERE id = ?1 AND created_ms >= ?2", params![id, floor], |r| r.get(0))
                 .optional()?)

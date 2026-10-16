@@ -10,12 +10,17 @@
 //! | `agg_pair`  | Zeit, Richtung, Quelle, Ziel, Protokoll, Dienst-Port | Sankey, Gegenstellen je Talker   |
 //!
 //! Eine Abfrage zerlegt ihr Zeitfenster in volle Stunden, volle Minuten und die Ränder davor/danach. Volle Stunden und
-//! Minuten kommen aus den Aggregaten, nur die Ränder (unter einer Minute) aus den Einzel-Flows – das Ergebnis ist exakt
-//! dasselbe wie über die Rohdaten, liest aber statt Millionen Flows nur einige tausend Summenzeilen.
+//! Minuten kommen aus den Aggregaten in `index.db`, nur die Ränder (unter einer Minute) aus den Einzel-Flows der
+//! Stundendateien – das Ergebnis ist exakt dasselbe wie über die Rohdaten, liest aber statt Millionen Flows nur einige
+//! tausend Summenzeilen. Bis zu acht Stundendateien werden dafür direkt angehängt; bei mehr werden die Einzel-Flows je
+//! Datei vorsummiert in eine temporäre Tabelle geladen (SQLite erlaubt höchstens zehn angehängte Dateien).
 
+use crate::store::{self, Attached};
+use crate::{Database, Result};
 use model::{FlowRecord, ip_to_bytes};
+use rusqlite::types::Value;
 use rusqlite::{Connection, Transaction, params};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::Hash;
 
 pub(crate) const MINUTE_MS: i64 = 60_000;
@@ -104,24 +109,45 @@ impl Kind {
         }
     }
 
-    /// Spalten, die eine Datenquelle dieser Art liefert (Rohdaten und Aggregat einheitlich)
-    fn select_columns(self) -> &'static str {
+    /// Schlüssel einer Datenquelle dieser Art (Rohdaten und Aggregat einheitlich), gefolgt von `bytes, packets, flows`
+    fn source_keys(self) -> &'static str {
         match self {
-            Kind::Ip => "ip, bytes, packets, flows",
-            Kind::Svc => "t, dir, proto, port, bytes, packets, flows",
-            Kind::Pair => "src_ip, dst_ip, proto, port, bytes, packets, flows",
+            Kind::Ip => "ip",
+            Kind::Svc => "t, dir, proto, port",
+            Kind::Pair => "src_ip, dst_ip, proto, port",
         }
     }
 
-    /// Dieselben Spalten aus den Einzel-Flows; `{c}` ist die WHERE-Bedingung.
-    fn raw_select(self, cond: &str) -> String {
+    fn select_columns(self) -> String {
+        format!("{}, bytes, packets, flows", self.source_keys())
+    }
+
+    /// Temporäre Tabelle mit den vorsummierten Einzel-Flows
+    fn raw_table(self) -> &'static str {
+        match self {
+            Kind::Ip => "raw_ip",
+            Kind::Svc => "raw_svc",
+            Kind::Pair => "raw_pair",
+        }
+    }
+
+    fn raw_ddl(self) -> &'static str {
+        match self {
+            Kind::Ip => "ip BLOB",
+            Kind::Svc => "t INTEGER, dir INTEGER, proto INTEGER, port INTEGER",
+            Kind::Pair => "src_ip BLOB, dst_ip BLOB, proto INTEGER, port INTEGER",
+        }
+    }
+
+    /// Dieselben Spalten aus den Einzel-Flows der Tabelle `table`; `cond` ist die WHERE-Bedingung.
+    fn raw_select(self, table: &str, cond: &str) -> String {
         match self {
             Kind::Ip => format!(
-                "SELECT src_ip AS ip, bytes, packets, 1 AS flows FROM flows WHERE {cond}
-                 UNION ALL SELECT dst_ip, bytes, packets, 1 FROM flows WHERE {cond}"
+                "SELECT src_ip AS ip, bytes, packets, 1 AS flows FROM {table} WHERE {cond}
+                 UNION ALL SELECT dst_ip, bytes, packets, 1 FROM {table} WHERE {cond}"
             ),
-            Kind::Svc => format!("SELECT ts AS t, dir, proto, {SERVICE_PORT_SQL} AS port, bytes, packets, 1 AS flows FROM flows WHERE {cond}"),
-            Kind::Pair => format!("SELECT src_ip, dst_ip, proto, {SERVICE_PORT_SQL} AS port, bytes, packets, 1 AS flows FROM flows WHERE {cond}"),
+            Kind::Svc => format!("SELECT ts AS t, dir, proto, {SERVICE_PORT_SQL} AS port, bytes, packets, 1 AS flows FROM {table} WHERE {cond}"),
+            Kind::Pair => format!("SELECT src_ip, dst_ip, proto, {SERVICE_PORT_SQL} AS port, bytes, packets, 1 AS flows FROM {table} WHERE {cond}"),
         }
     }
 
@@ -159,42 +185,6 @@ pub(crate) fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
                 key_columns = kind.key_columns(),
             ))?;
         }
-    }
-    Ok(())
-}
-
-/// Aggregate aus bereits gespeicherten Flows aufbauen (einmalig beim Upgrade einer bestehenden Datenbank).
-pub(crate) fn backfill(conn: &Connection) -> rusqlite::Result<()> {
-    let minute = |col: &str| format!("({col} / {MINUTE_MS}) * {MINUTE_MS}");
-    let t = minute("ts");
-    for kind in Kind::ALL {
-        let table = kind.table(Level::Minute);
-        let sql = match kind {
-            Kind::Ip => format!(
-                "INSERT INTO {table} SELECT t, dir, ip, SUM(bytes), SUM(packets), COUNT(*) FROM (
-                     SELECT {t} AS t, dir, src_ip AS ip, bytes, packets FROM flows
-                     UNION ALL SELECT {t}, dir, dst_ip, bytes, packets FROM flows
-                 ) GROUP BY 1, 2, 3"
-            ),
-            Kind::Svc => format!(
-                "INSERT INTO {table} SELECT {t}, dir, proto, {SERVICE_PORT_SQL}, SUM(bytes), SUM(packets), COUNT(*) FROM flows GROUP BY 1, 2, 3, 4"
-            ),
-            Kind::Pair => format!(
-                "INSERT INTO {table} SELECT {t}, dir, src_ip, dst_ip, proto, {SERVICE_PORT_SQL}, SUM(bytes), SUM(packets), COUNT(*)
-                 FROM flows GROUP BY 1, 2, 3, 4, 5, 6"
-            ),
-        };
-        conn.execute(&sql, [])?;
-        // Stunden aus den Minuten
-        let keys = kind.key_columns();
-        conn.execute(
-            &format!(
-                "INSERT INTO {hour} SELECT (t / {HOUR_MS}) * {HOUR_MS}, {keys}, SUM(bytes), SUM(packets), SUM(flows)
-                 FROM {table} GROUP BY 1, {keys}",
-                hour = kind.table(Level::Hour),
-            ),
-            [],
-        )?;
     }
     Ok(())
 }
@@ -349,32 +339,93 @@ fn split(lo: i64, hi: i64, level: Level, out: &mut Vec<Segment>) {
     }
 }
 
-/// Datenquelle für eine Aggregations-Abfrage: `UNION ALL` über die Abschnitte, mit einheitlichen Spalten je [`Kind`].
-pub(crate) fn source(kind: Kind, segments: &[Segment], dir: Option<u8>) -> (String, Vec<rusqlite::types::Value>) {
-    use rusqlite::types::Value;
+/// Ausschnitt `[lo, hi)` der Einzel-Flows mit Filterbedingung `cond` (Parameter `params`).
+pub(crate) struct RawPart {
+    pub lo: i64,
+    pub hi: i64,
+    pub cond: String,
+    pub params: Vec<Value>,
+}
+
+/// Stundendateien, die eine Abfrage höchstens direkt anhängt
+const INLINE_FILES: [&str; 8] = ["f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7"];
+
+/// Datenquelle einer Aggregations-Abfrage: SQL (`UNION ALL` mit einheitlichen Spalten je [`Kind`]) samt Parametern. Die
+/// benötigten Stundendateien bleiben angehängt, solange sie lebt.
+pub(crate) struct Source<'c> {
+    pub sql: String,
+    pub params: Vec<Value>,
+    _files: Vec<Attached<'c>>,
+}
+
+impl<'c> Source<'c> {
+    /// Aggregat-Abschnitte (`sql`, `params`) und Einzel-Flows aus `raw` zu einer Datenquelle verbinden.
+    pub(crate) fn build(conn: &'c Connection, db: &Database, kind: Kind, mut sql: Vec<String>, mut params: Vec<Value>, raw: &[RawPart]) -> Result<Self> {
+        let per_part = raw.iter().map(|p| db.hours(p.lo, p.hi)).collect::<Result<Vec<_>>>()?;
+        let hours: BTreeSet<i64> = per_part.iter().flatten().copied().collect();
+        let mut files = Vec::new();
+        if !hours.is_empty() && hours.len() <= INLINE_FILES.len() {
+            let mut names = HashMap::new();
+            for (hour, name) in hours.into_iter().zip(INLINE_FILES) {
+                files.push(store::attach(conn, &db.hour_path(hour)?, name)?);
+                names.insert(hour, name);
+            }
+            for (part, hours) in raw.iter().zip(&per_part) {
+                for hour in hours {
+                    sql.push(kind.raw_select(&format!("{}.flows", names[hour]), &part.cond));
+                    for _ in 0..kind.raw_param_repeat() {
+                        params.extend(part.params.iter().cloned());
+                    }
+                }
+            }
+        } else if !raw.is_empty() || sql.is_empty() {
+            load(conn, db, kind, raw)?;
+            sql.push(format!("SELECT {} FROM temp.{}", kind.select_columns(), kind.raw_table()));
+        }
+        Ok(Self { sql: sql.join("\nUNION ALL "), params, _files: files })
+    }
+}
+
+/// Aggregat-Abschnitte einer Abfrage (SQL je Abschnitt und Parameter) und die Einzel-Flows der übrigen Abschnitte (Ränder
+/// unter einer Minute) als [`RawPart`] – zusammengesetzt von [`Source::build`].
+pub(crate) fn source(kind: Kind, segments: &[Segment], dir: Option<u8>) -> (Vec<String>, Vec<Value>, Vec<RawPart>) {
     let dir_sql = if dir.is_some() { " AND dir = ?" } else { "" };
     let mut parts = Vec::with_capacity(segments.len());
     let mut params = Vec::new();
+    let mut raw = Vec::new();
     for seg in segments {
         let mut seg_params = vec![Value::Integer(seg.lo), Value::Integer(seg.hi)];
         seg_params.extend(dir.map(|d| Value::Integer(d as i64)));
         if seg.level == Level::Raw {
-            parts.push(kind.raw_select(&format!("ts >= ? AND ts < ?{dir_sql}")));
-            for _ in 0..kind.raw_param_repeat() {
-                params.extend(seg_params.iter().cloned());
-            }
+            raw.push(RawPart { lo: seg.lo, hi: seg.hi, cond: format!("ts >= ? AND ts < ?{dir_sql}"), params: seg_params });
         } else {
             parts.push(format!("SELECT {} FROM {} WHERE t >= ? AND t < ?{dir_sql}", kind.select_columns(), kind.table(seg.level)));
             params.extend(seg_params);
         }
     }
-    (parts.join("\nUNION ALL "), params)
+    (parts, params, raw)
 }
 
-/// Datenquelle nur aus den Einzel-Flows mit beliebiger Filterbedingung (für Filter, die die Aggregate nicht kennen).
-pub(crate) fn raw_source(kind: Kind, cond: &str, cond_params: &[rusqlite::types::Value]) -> (String, Vec<rusqlite::types::Value>) {
-    let params = (0..kind.raw_param_repeat()).flat_map(|_| cond_params.iter().cloned()).collect();
-    (kind.raw_select(cond), params)
+/// Einzel-Flows der Ausschnitte aus den Stundendateien in die temporäre Tabelle der Art laden, je Datei vorsummiert.
+fn load(conn: &Connection, db: &Database, kind: Kind, parts: &[RawPart]) -> Result<()> {
+    let table = kind.raw_table();
+    conn.execute_batch(&format!(
+        "CREATE TEMP TABLE IF NOT EXISTS {table} ({}, bytes INTEGER, packets INTEGER, flows INTEGER); DELETE FROM temp.{table};",
+        kind.raw_ddl()
+    ))?;
+    let keys = kind.source_keys();
+    for part in parts {
+        let sql = format!(
+            "INSERT INTO temp.{table} SELECT {keys}, SUM(bytes), SUM(packets), SUM(flows) FROM ({}) GROUP BY {keys}",
+            kind.raw_select("f.flows", &part.cond)
+        );
+        let params: Vec<&Value> = (0..kind.raw_param_repeat()).flat_map(|_| part.params.iter()).collect();
+        for hour in db.hours(part.lo, part.hi)? {
+            let _f = store::attach(conn, &db.hour_path(hour)?, "f")?;
+            conn.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

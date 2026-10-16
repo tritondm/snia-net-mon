@@ -1,14 +1,20 @@
 use super::*;
-use std::path::Path;
 use std::net::IpAddr;
 
-fn temp_db(name: &str) -> (Database, PathBuf) {
+fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("snm-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("flows.db");
-    let db = Database::open(&DbConfig { path: path.clone(), retention_hours: 72, cleanup_interval: Duration::from_secs(60), secure_delete: true }).unwrap();
-    (db, dir)
+    dir
+}
+
+fn open_live(dir: &Path, retention_hours: u64, secure_delete: bool) -> Database {
+    Database::open(&DbConfig { dir: dir.join("live"), retention_hours, cleanup_interval: Duration::from_secs(60), secure_delete }).unwrap()
+}
+
+fn temp_db(name: &str) -> (Database, PathBuf) {
+    let dir = temp_dir(name);
+    (open_live(&dir, 72, true), dir)
 }
 
 fn flow(ts_ms: i64, src: &str, dst: &str, dst_port: u16, bytes: u64) -> FlowRecord {
@@ -38,32 +44,49 @@ async fn ingest(db: &Database, flows: Vec<FlowRecord>) {
     tokio::task::spawn_blocking(move || writer.join().unwrap()).await.unwrap();
 }
 
+/// Stundendateien eines Speichers mit der Zahl ihrer Flows
+fn hour_files(db: &Database) -> Vec<(i64, i64)> {
+    store::list_hours(db.dir(), "")
+        .unwrap()
+        .into_iter()
+        .map(|(hour, path)| (hour, rusqlite::Connection::open(path).unwrap().query_row("SELECT COUNT(*) FROM flows", [], |r| r.get(0)).unwrap()))
+        .collect()
+}
+
+fn all(limit: u32) -> FlowFilter {
+    FlowFilter { from: Some(0), limit: Some(limit), ..Default::default() }
+}
+
 #[tokio::test]
-async fn retention_deletes_everything_older_than_72h_and_hides_it_from_queries() {
+async fn retention_removes_whole_hours_enforces_72h_and_hides_older_flows() {
     let (db, dir) = temp_db("retention");
+    db.accept_late_flows();
     let now = now_ms();
     let hour = HOUR_MS;
     ingest(
         &db,
         vec![
-            flow(now - 80 * hour, "10.0.0.1", "1.1.1.1", 443, 100), // zu alt
-            flow(now - 73 * hour, "10.0.0.1", "1.1.1.1", 443, 100), // zu alt
-            flow(now - 71 * hour, "10.0.0.2", "1.1.1.1", 443, 100), // bleibt
-            flow(now - 60_000, "10.0.0.3", "1.1.1.1", 443, 100),    // bleibt
+            flow(now - 80 * hour, "10.0.0.1", "1.1.1.1", 443, 100), // zu alt, eigene Stunde
+            flow(now - 73 * hour, "10.0.0.1", "1.1.1.1", 443, 100), // zu alt, eigene Stunde
+            flow(now - 72 * hour - 1000, "10.0.0.1", "1.1.1.1", 443, 100), // zu alt, evtl. in der Grenzstunde
+            flow(now - 72 * hour + 60_000, "10.0.0.2", "1.1.1.1", 443, 100), // bleibt
+            flow(now - 60_000, "10.0.0.3", "1.1.1.1", 443, 100), // bleibt
         ],
     )
     .await;
+    assert!(hour_files(&db).len() >= 4);
 
     // Schon vor dem Cleanup liefern Abfragen nichts außerhalb des Fensters
-    let all = db.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap();
-    assert_eq!(all.len(), 2);
+    assert_eq!(db.query_flows(all(100)).await.unwrap().len(), 2);
 
-    assert_eq!(db.cleanup_now().await.unwrap(), 2);
-    let conn = schema::open_connection(&dir.join("flows.db"), true).unwrap();
-    let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM flows", [], |r| r.get(0)).unwrap();
-    assert_eq!(remaining, 2);
-    let oldest: i64 = conn.query_row("SELECT MIN(ts) FROM flows", [], |r| r.get(0)).unwrap();
-    assert!(oldest >= now - 72 * hour);
+    assert_eq!(db.cleanup_now().await.unwrap(), 3);
+    let files = hour_files(&db);
+    assert_eq!(files.iter().map(|(_, n)| n).sum::<i64>(), 2);
+    // Ganze Stunden vor der Grenze sind als Datei verschwunden, in der Grenzstunde ist nichts älter als 72 h
+    assert!(files.iter().all(|&(h, _)| h + HOUR_MS > now - 72 * hour));
+    let (oldest, newest) = db.time_range().await.unwrap();
+    assert!(oldest.unwrap() >= now - 72 * hour);
+    assert_eq!(newest, Some(now - 60_000));
     assert_eq!(db.stats().await.unwrap().rows, 2);
     // Ein zweiter Lauf hat nichts mehr zu tun
     assert_eq!(db.cleanup_now().await.unwrap(), 0);
@@ -71,10 +94,49 @@ async fn retention_deletes_everything_older_than_72h_and_hides_it_from_queries()
 }
 
 #[tokio::test]
+async fn flows_before_the_retention_window_are_not_stored() {
+    let (db, dir) = temp_db("late");
+    let now = now_ms();
+    ingest(&db, vec![flow(now - 80 * HOUR_MS, "10.0.0.1", "1.1.1.1", 443, 100), flow(now - 1000, "10.0.0.2", "1.1.1.1", 443, 100)]).await;
+    let stats = db.stats().await.unwrap();
+    assert_eq!((stats.rows, stats.inserted, stats.late_flows), (1, 1, 1));
+    assert_eq!(hour_files(&db).len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn retention_cannot_exceed_72_hours() {
-    let dir = std::env::temp_dir().join(format!("snm-test-clamp-{}", std::process::id()));
-    let db = Database::open(&DbConfig { path: dir.join("f.db"), retention_hours: 24 * 30, cleanup_interval: Duration::from_secs(60), secure_delete: true }).unwrap();
+    let dir = temp_dir("clamp");
+    let db = open_live(&dir, 24 * 30, true);
     assert_eq!(db.retention_ms(), 72 * HOUR_MS);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn flows_are_stored_per_hour_and_searched_newest_first() {
+    let (db, dir) = temp_db("hours");
+    let now = now_ms();
+    let flows: Vec<_> = (0..50).map(|i| flow(now - i * 6 * 60_000, "192.168.1.10", "1.1.1.1", 443, 100 + i as u64)).collect();
+    ingest(&db, flows).await;
+    // 50 Flows im Abstand von 6 Minuten: 5 Stunden, je nach Uhrzeit 5 oder 6 Dateien
+    let files = hour_files(&db);
+    assert!((5..=6).contains(&files.len()), "{files:?}");
+    assert_eq!(files.iter().map(|(_, n)| n).sum::<i64>(), 50);
+    assert!(files.iter().all(|&(h, _)| store::hour_of(h) == h));
+
+    let newest = db.query_flows(all(3)).await.unwrap();
+    assert_eq!(newest.iter().map(|r| r.ts).collect::<Vec<_>>(), [now, now - 6 * 60_000, now - 12 * 60_000]);
+    let every = db.query_flows(all(5000)).await.unwrap();
+    assert_eq!(every.len(), 50);
+    assert!(every.windows(2).all(|w| w[0].ts > w[1].ts));
+    let ids: std::collections::HashSet<i64> = every.iter().map(|r| r.id).collect();
+    assert_eq!(ids.len(), 50, "IDs müssen über alle Stundendateien eindeutig sein");
+
+    // Verbindungen über mehrere Dateien werden zu einer zusammengefasst
+    let conns = db.connections(FlowFilter { from: Some(now - 5 * HOUR_MS), ..Default::default() }).await.unwrap();
+    assert_eq!(conns.len(), 1);
+    assert_eq!((conns[0].flows, conns[0].last_seen), (50, now));
+    assert_eq!(conns[0].first_seen, now - 49 * 6 * 60_000 - 1000);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -106,6 +168,9 @@ async fn filters_and_aggregations() {
     assert_eq!(talkers[0].ip, "1.1.1.1");
     assert_eq!(talkers[0].bytes, 6000);
     assert_eq!(talkers[1].ip, "192.168.1.10");
+    // Mit IP-Filter kommen die Talker aus den Einzel-Flows
+    let filtered = db.top_talkers(FlowFilter { ip: Some("9.9.9.9".into()), ..Default::default() }).await.unwrap();
+    assert_eq!(filtered.iter().map(|t| t.bytes).collect::<Vec<_>>(), [100, 100]);
 
     let ports = db.top_ports(FlowFilter::default()).await.unwrap();
     assert_eq!((ports[0].port, ports[0].bytes), (443, 6700));
@@ -167,63 +232,6 @@ async fn direction_filter_and_summary() {
     let talkers = db.top_talkers(FlowFilter { dir: Some("in".into()), ..Default::default() }).await.unwrap();
     assert_eq!(talkers.len(), 2);
     assert!(talkers.iter().all(|t| t.bytes == 9000));
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn old_database_without_direction_column_is_migrated() {
-    let dir = std::env::temp_dir().join(format!("snm-test-migrate-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("old.db");
-    {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE flows (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, start_ts INTEGER NOT NULL, bucket INTEGER NOT NULL,
-             src_ip BLOB NOT NULL, dst_ip BLOB NOT NULL, src_port INTEGER NOT NULL, dst_port INTEGER NOT NULL, proto INTEGER NOT NULL,
-             bytes INTEGER NOT NULL, packets INTEGER NOT NULL, tcp_flags INTEGER NOT NULL, in_if INTEGER NOT NULL, out_if INTEGER NOT NULL,
-             exporter BLOB NOT NULL);",
-        )
-        .unwrap();
-    }
-    // Ein entpacktes Archiv im alten Format wird nur gelesen und nicht umgeschrieben
-    let view_path = dir.join("view.db");
-    std::fs::copy(&path, &view_path).unwrap();
-    let db = Database::open(&DbConfig { path: path.clone(), retention_hours: 72, cleanup_interval: Duration::from_secs(60), secure_delete: true }).unwrap();
-    ingest(&db, vec![flow(now_ms() - 1000, "192.168.1.10", "1.1.1.1", 443, 10)]).await;
-    assert_eq!(db.query_flows(FlowFilter::default()).await.unwrap()[0].direction, model::Direction::Out);
-    // Version 3: Spalte bucket und Index auf dst_port sind entfernt
-    let conn = schema::open_connection(&path, true).unwrap();
-    let column = |conn: &rusqlite::Connection| -> i64 {
-        conn.query_row("SELECT COUNT(*) FROM pragma_table_info('flows') WHERE name = 'bucket'", [], |r| r.get(0)).unwrap()
-    };
-    assert_eq!(column(&conn), 0);
-    let index: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_flows_dport_ts'", [], |r| r.get(0)).unwrap();
-    assert_eq!(index, 0);
-
-    let view = Database::open_view(&view_path).unwrap();
-    assert!(view.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().is_empty());
-    assert_eq!(column(&schema::open_connection(&view_path, false).unwrap()), 1);
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn retention_without_secure_delete_reuses_free_pages() {
-    let dir = std::env::temp_dir().join(format!("snm-test-nosecure-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let path = dir.join("flows.db");
-    let db = Database::open(&DbConfig { path: path.clone(), retention_hours: 72, cleanup_interval: Duration::from_secs(60), secure_delete: false }).unwrap();
-    let now = now_ms();
-    let old: Vec<_> = (0..2000).map(|i| flow(now - 80 * HOUR_MS + i, "10.0.0.1", "1.1.1.1", 443, 100)).collect();
-    ingest(&db, old).await;
-    ingest(&db, vec![flow(now - 60_000, "10.0.0.2", "1.1.1.1", 443, 100)]).await;
-    assert_eq!(db.cleanup_now().await.unwrap(), 2000);
-    let conn = schema::open_connection(&path, false).unwrap();
-    let secure: i64 = conn.query_row("PRAGMA secure_delete", [], |r| r.get(0)).unwrap();
-    assert_eq!(secure, 0);
-    let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM flows", [], |r| r.get(0)).unwrap();
-    assert_eq!(remaining, 1);
-    assert_eq!(db.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -317,7 +325,8 @@ async fn aggregated_statistics_match_raw_flows() {
     for chunk in flows.chunks(700) {
         ingest(&db, chunk.to_vec()).await;
     }
-    let conn = schema::open_connection(&dir.join("flows.db"), true).unwrap();
+    assert!(hour_files(&db).len() >= 5);
+    let conn = db.connect().unwrap();
     let hours: i64 = conn.query_row("SELECT COUNT(*) FROM agg_svc_1h", [], |r| r.get(0)).unwrap();
     assert!(hours > 0, "Aggregate wurden nicht geschrieben");
 
@@ -334,34 +343,37 @@ async fn aggregated_statistics_match_raw_flows() {
 }
 
 #[tokio::test]
-async fn existing_database_gets_aggregates_backfilled() {
-    let (db, dir) = temp_db("backfill");
+async fn statistics_over_more_hour_files_than_can_be_attached() {
+    let (db, dir) = temp_db("many-hours");
     let now = now_ms();
-    ingest(&db, mixed_flows(now, 1500)).await;
-    db.set_rollups(false);
-    let filter = test_windows(now).remove(0);
-    let raw = stats_snapshot(&db, &filter).await;
-    drop(db);
-    {
-        // Stand vor der Voraggregation herstellen
-        let conn = schema::open_connection(&dir.join("flows.db"), true).unwrap();
-        for table in rollup::tables() {
-            conn.execute_batch(&format!("DROP TABLE {table};")).unwrap();
-        }
-        conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+    // Über zwölf Stunden verteilt: ohne Aggregate braucht ein Fenster mehr Dateien, als SQLite anhängen kann
+    let flows: Vec<_> = mixed_flows(now, 2400).into_iter().enumerate().map(|(i, mut f)| {
+        f.ts_ms -= (i % 12) as i64 * HOUR_MS / 2 + (i % 12) as i64 * 1000;
+        f
+    }).collect();
+    ingest(&db, flows).await;
+    assert!(hour_files(&db).len() > 9);
+    let windows = [
+        FlowFilter { from: Some(now - 12 * HOUR_MS), to: Some(now), ..Default::default() },
+        FlowFilter { from: Some(now - 11 * HOUR_MS - 4321), to: Some(now - 999), dir: Some("out".into()), ..Default::default() },
+    ];
+    for filter in windows {
+        db.set_rollups(true);
+        let aggregated = stats_snapshot(&db, &filter).await;
+        db.set_rollups(false);
+        assert_eq!(aggregated, stats_snapshot(&db, &filter).await, "Abweichung für {filter:?}");
     }
-    let db = Database::open(&DbConfig { path: dir.join("flows.db"), retention_hours: 72, cleanup_interval: Duration::from_secs(60), secure_delete: true }).unwrap();
-    assert_eq!(stats_snapshot(&db, &filter).await, raw);
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn retention_also_removes_aggregates() {
     let (db, dir) = temp_db("rollup-retention");
+    db.accept_late_flows();
     let now = now_ms();
     ingest(&db, vec![flow(now - 80 * HOUR_MS, "10.0.0.1", "1.1.1.1", 443, 100), flow(now - 60_000, "10.0.0.2", "1.1.1.1", 443, 100)]).await;
     db.cleanup_now().await.unwrap();
-    let conn = schema::open_connection(&dir.join("flows.db"), true).unwrap();
+    let conn = db.connect().unwrap();
     let floor = now - 72 * HOUR_MS;
     for table in rollup::tables() {
         let old: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE t < ?1"), [floor], |r| r.get(0)).unwrap();
@@ -369,6 +381,23 @@ async fn retention_also_removes_aggregates() {
         assert_eq!(old, 0, "{table}");
         assert!(recent > 0, "{table}");
     }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn retention_without_secure_delete() {
+    let dir = temp_dir("nosecure");
+    let db = open_live(&dir, 72, false);
+    db.accept_late_flows();
+    let now = now_ms();
+    let old: Vec<_> = (0..2000).map(|i| flow(now - 80 * HOUR_MS + i, "10.0.0.1", "1.1.1.1", 443, 100)).collect();
+    ingest(&db, old).await;
+    ingest(&db, vec![flow(now - 60_000, "10.0.0.2", "1.1.1.1", 443, 100)]).await;
+    assert_eq!(db.cleanup_now().await.unwrap(), 2000);
+    let secure: i64 = db.connect().unwrap().query_row("PRAGMA secure_delete", [], |r| r.get(0)).unwrap();
+    assert_eq!(secure, 0);
+    assert_eq!(hour_files(&db).iter().map(|(_, n)| n).sum::<i64>(), 1);
+    assert_eq!(db.query_flows(all(100)).await.unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -411,10 +440,13 @@ async fn bench_statistics_with_and_without_aggregates() {
     }
     drop(tx);
     tokio::task::spawn_blocking(move || writer.join().unwrap()).await.unwrap();
-    let path = dir.join("flows.db");
-    let size = std::fs::metadata(&path).unwrap().len() + std::fs::metadata(dir.join("flows.db-wal")).map(|m| m.len()).unwrap_or(0);
-    println!("{count} Flows geschrieben in {:.1?} ({:.0} Flows/s), Datei {} MiB", started.elapsed(), count as f64 / started.elapsed().as_secs_f64(), size >> 20);
-    let conn = schema::open_connection(&path, true).unwrap();
+    println!(
+        "{count} Flows geschrieben in {:.1?} ({:.0} Flows/s), Verzeichnis {} MiB",
+        started.elapsed(),
+        count as f64 / started.elapsed().as_secs_f64(),
+        store::dir_size(db.dir()) >> 20
+    );
+    let conn = db.connect().unwrap();
     for table in rollup::tables() {
         let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap();
         println!("  {table}: {n} Zeilen");
@@ -439,13 +471,15 @@ async fn bench_statistics_with_and_without_aggregates() {
         time!("zeitreihe", db.timeseries(filter.clone(), 120));
         time!("sankey", db.sankey(filter.clone()));
         time!("peers", db.peers(FlowFilter { limit: Some(2000), ..filter.clone() }));
+        time!("suche", db.query_flows(FlowFilter { limit: Some(500), ..filter.clone() }));
+        time!("suche ip", db.query_flows(FlowFilter { ip: Some("192.168.1.7".into()), limit: Some(500), ..filter.clone() }));
     }
     let _ = std::fs::remove_dir_all(dir);
 }
 
 fn history_config(dir: &Path, max_bytes: u64, retention_days: u64) -> HistoryConfig {
     HistoryConfig {
-        path: dir.join("history.db"),
+        dir: dir.join("history"),
         max_bytes,
         archive_dir: dir.join("archive"),
         archive_retention: Duration::from_secs(retention_days * 86_400),
@@ -455,7 +489,7 @@ fn history_config(dir: &Path, max_bytes: u64, retention_days: u64) -> HistoryCon
 }
 
 #[tokio::test]
-async fn history_takes_over_flows_in_steps_with_exact_aggregates() {
+async fn history_takes_over_hours_in_steps_with_exact_aggregates() {
     let (live, dir) = temp_db("history-steps");
     let history = History::open(history_config(&dir, u64::MAX, 90)).unwrap();
     let now = now_ms();
@@ -468,24 +502,23 @@ async fn history_takes_over_flows_in_steps_with_exact_aggregates() {
         expected.push(stats_snapshot(&live, &filter).await);
     }
 
-    // In mehreren Schritten verschieben – auch mitten in einer Stunde, wie es der Retention-Task tut
-    let minute = |ts: i64| ts.div_euclid(MINUTE_MS) * MINUTE_MS;
+    // In mehreren Schritten verschieben, wie es der Retention-Task stündlich tut
     let mut moved = 0;
-    for cutoff in [minute(now - 3 * HOUR_MS - 17 * MINUTE_MS), minute(now - HOUR_MS + 5 * MINUTE_MS), minute(now) + MINUTE_MS] {
-        let path = live.path().to_path_buf();
-        let h = history.clone();
-        moved += tokio::task::spawn_blocking(move || h.absorb(&path, cutoff)).await.unwrap().unwrap();
-        live.cleanup_before(cutoff).await.unwrap();
-        // Wiederholung (z. B. nach Absturz zwischen Kopieren und Löschen) kopiert nichts doppelt
-        let path = live.path().to_path_buf();
-        let h = history.clone();
-        assert_eq!(tokio::task::spawn_blocking(move || h.absorb(&path, cutoff)).await.unwrap().unwrap(), 0);
+    for cutoff in [store::hour_of(now - 3 * HOUR_MS), store::hour_of(now - HOUR_MS), store::hour_of(now) + HOUR_MS] {
+        moved += live.move_before(&history, cutoff).await.unwrap();
+        // Wiederholung (z. B. nach Absturz zwischen Aggregaten und Dateien) verschiebt nichts doppelt
+        assert_eq!(live.move_before(&history, cutoff).await.unwrap(), 0);
+        assert!(hour_files(&live).iter().all(|&(h, _)| h >= cutoff));
     }
     assert_eq!(moved, 3000);
-    assert!(live.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().is_empty());
+    assert!(live.query_flows(all(100)).await.unwrap().is_empty());
+    assert!(hour_files(&live).is_empty());
+    let conn = live.connect().unwrap();
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM agg_pair_1m", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0, "Aggregate bleiben nicht in der Live-Datenbank zurück");
 
     let stored = history.current().unwrap();
-    assert_eq!(stored.query_flows(FlowFilter { from: Some(0), limit: Some(5000), ..Default::default() }).await.unwrap().len(), 3000);
+    assert_eq!(stored.query_flows(all(5000)).await.unwrap().len(), 3000);
     for (filter, expected) in test_windows(now).into_iter().zip(expected) {
         stored.set_rollups(true);
         assert_eq!(stats_snapshot(&stored, &filter).await, expected, "Aggregate der Historie weichen ab für {filter:?}");
@@ -495,10 +528,9 @@ async fn history_takes_over_flows_in_steps_with_exact_aggregates() {
 
 #[tokio::test]
 async fn history_rotates_into_compressed_archive_that_can_be_opened_and_expires() {
-    let dir = std::env::temp_dir().join(format!("snm-test-archive-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let live = Database::open(&DbConfig { path: dir.join("flows.db"), retention_hours: 48, cleanup_interval: Duration::from_secs(60), secure_delete: true }).unwrap();
+    let dir = temp_dir("archive");
+    let live = open_live(&dir, 48, true);
+    live.accept_late_flows();
     // max_bytes = 1: jede nicht leere Historie wird bei der Wartung rotiert
     let history = History::open(history_config(&dir, 1, 90)).unwrap();
     let now = now_ms();
@@ -512,8 +544,10 @@ async fn history_rotates_into_compressed_archive_that_can_be_opened_and_expires(
     )
     .await;
     assert_eq!(live.move_to_history(&history).await.unwrap(), 2);
-    assert_eq!(live.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().len(), 1);
-    assert_eq!(history.current().unwrap().query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().len(), 2);
+    assert_eq!(live.query_flows(all(100)).await.unwrap().len(), 1);
+    assert_eq!(history.current().unwrap().query_flows(all(100)).await.unwrap().len(), 2);
+    let status = history.status().await.unwrap();
+    assert_eq!((status.oldest_ts_ms, status.newest_ts_ms), (Some(now - 60 * HOUR_MS), Some(now - 49 * HOUR_MS)));
 
     history.maintain().await;
     let mut archives = Vec::new();
@@ -528,13 +562,15 @@ async fn history_rotates_into_compressed_archive_that_can_be_opened_and_expires(
     let archive = &archives[0];
     assert_eq!(archive.state, "packed");
     assert_eq!(archive.from_ms, (now - 60 * HOUR_MS) / 1000 * 1000);
-    assert!(!dir.join("history.db.rotating").exists());
+    assert!(!dir.join("history.rotating").exists());
+    let packed = store::list_hours(&dir.join("archive").join(&archive.name), store::PACKED_EXT).unwrap();
+    assert_eq!(packed.len(), 2, "jede Stunde einzeln gepackt");
     // Die neue Historie ist leer und setzt an der alten Grenze fort
-    assert!(history.current().unwrap().query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap().is_empty());
+    assert!(history.current().unwrap().query_flows(all(100)).await.unwrap().is_empty());
     assert_eq!(live.move_to_history(&history).await.unwrap(), 0);
 
     assert!(matches!(history.archive(&archive.name), Err(DbError::Unavailable(_))));
-    assert!(history.open_archive("../history.db").is_err());
+    assert!(history.open_archive("../history").is_err());
     history.open_archive(&archive.name).unwrap();
     let mut opened = None;
     for _ in 0..200 {
@@ -544,8 +580,17 @@ async fn history_rotates_into_compressed_archive_that_can_be_opened_and_expires(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let opened = opened.expect("Archiv wurde nicht entpackt");
-    let rows = opened.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap();
+    let opened = opened.expect("Archiv wurde nicht geöffnet");
+    let view = dir.join("archive").join(".view").join(&archive.name);
+    // Statistiken kommen aus den Aggregaten – dafür wird keine Stundendatei entpackt
+    let talkers = opened.top_talkers(FlowFilter { from: Some(store::hour_of(now - 61 * HOUR_MS)), to: Some(store::hour_of(now - 48 * HOUR_MS)), ..Default::default() }).await.unwrap();
+    assert_eq!(talkers[0].bytes, 300);
+    assert!(store::list_hours(&view, "").unwrap().is_empty());
+    // Die Suche entpackt nur, was sie braucht: neueste Stunde zuerst
+    let newest = opened.query_flows(FlowFilter { from: Some(0), limit: Some(1), ..Default::default() }).await.unwrap();
+    assert_eq!(newest[0].bytes, 200);
+    assert_eq!(store::list_hours(&view, "").unwrap().len(), 1);
+    let rows = opened.query_flows(all(100)).await.unwrap();
     assert_eq!(rows.iter().map(|r| r.bytes).sum::<i64>(), 300);
     assert_eq!(history.archives().unwrap()[0].state, "ready");
     drop(opened);
@@ -561,8 +606,8 @@ async fn history_rotates_into_compressed_archive_that_can_be_opened_and_expires(
 #[tokio::test(flavor = "multi_thread")]
 async fn writer_retries_when_database_stays_locked_longer_than_busy_timeout() {
     let (db, dir) = temp_db("locked");
-    // Eine andere Verbindung hält die Schreibsperre länger als das Busy-Timeout von 10 s (wie ein langsames DELETE)
-    let blocker = schema::open_connection(&dir.join("flows.db"), true).unwrap();
+    // Eine andere Verbindung hält die Schreibsperre auf index.db länger als das Busy-Timeout von 10 s
+    let blocker = db.connect().unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let release = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(12));
@@ -570,31 +615,29 @@ async fn writer_retries_when_database_stays_locked_longer_than_busy_timeout() {
     });
     ingest(&db, vec![flow(now_ms() - 60_000, "10.0.0.1", "1.1.1.1", 443, 100)]).await;
     release.join().unwrap();
-    let all = db.query_flows(FlowFilter { from: Some(0), ..Default::default() }).await.unwrap();
-    assert_eq!(all.len(), 1, "Flow darf trotz Sperre nicht verloren gehen");
+    assert_eq!(db.query_flows(all(100)).await.unwrap().len(), 1, "Flow darf trotz Sperre nicht verloren gehen");
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Lastprobe Schreiben + Retention wie im Betrieb (viele kleine Cleanup-Schritte):
-/// `cargo test -p db --release -- --ignored bench_cleanup --nocapture` (Anzahl per `BENCH_FLOWS`, Standard 1 Mio.)
+/// Lastprobe Schreiben + Retention: `cargo test -p db --release -- --ignored bench_cleanup --nocapture`
+/// (Anzahl per `BENCH_FLOWS`, Standard 1 Mio.; für echte Plattenwerte `TMPDIR` auf die Zielplatte setzen)
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn bench_cleanup_with_and_without_secure_delete() {
     let count: usize = std::env::var("BENCH_FLOWS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
-    const STEPS: i64 = 40;
     for secure_delete in [true, false] {
-        let dir = std::env::temp_dir().join(format!("snm-bench-cleanup-{secure_delete}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let db = Database::open(&DbConfig { path: dir.join("flows.db"), retention_hours: 72, cleanup_interval: Duration::from_secs(60), secure_delete }).unwrap();
-        // Gleichmäßig über eine Stunde verteilt, beginnend vor zwei Stunden
-        let base = now_ms() - 2 * HOUR_MS;
+        let dir = temp_dir(&format!("bench-cleanup-{secure_delete}"));
+        let db = open_live(&dir, 48, secure_delete);
+        db.accept_late_flows();
+        // Gleichmäßig über zwei Stunden verteilt, beide vor dem Fenster
+        let base = store::hour_of(now_ms() - 51 * HOUR_MS);
         let started = Instant::now();
         let (tx, rx) = mpsc::channel(64);
         let writer = db.spawn_writer(rx).unwrap();
         for chunk_start in (0..count).step_by(10_000) {
             let batch: Vec<FlowRecord> = (chunk_start..(chunk_start + 10_000).min(count))
                 .map(|i| {
-                    let ts = base + (i as i64 * HOUR_MS / count as i64);
+                    let ts = base + (i as i64 * 2 * HOUR_MS / count as i64);
                     let mut f = flow(ts, &format!("192.168.1.{}", i % 200), &format!("1.{}.{}.1", i % 250, (i / 250) % 250), 443, 1000);
                     f.src_port = 1024 + (i % 60000) as u16;
                     f
@@ -605,14 +648,10 @@ async fn bench_cleanup_with_and_without_secure_delete() {
         drop(tx);
         tokio::task::spawn_blocking(move || writer.join().unwrap()).await.unwrap();
         let written = started.elapsed();
-        // Die ältere Hälfte in kleinen Schritten löschen, wie der minütliche Retention-Task
         let t = Instant::now();
-        let mut deleted = 0;
-        for step in 1..=STEPS {
-            deleted += db.cleanup_before(base + step * HOUR_MS / 2 / STEPS).await.unwrap();
-        }
+        let deleted = db.cleanup_now().await.unwrap();
         println!(
-            "secure_delete={secure_delete:<5}  schreiben {count} Flows: {written:>7.1?} ({:.0}/s)   cleanup {deleted} Flows in {STEPS} Schritten: {:>7.1?}",
+            "secure_delete={secure_delete:<5}  schreiben {count} Flows: {written:>7.1?} ({:.0}/s)   cleanup {deleted} Flows (zwei Stundendateien): {:>7.1?}",
             count as f64 / written.as_secs_f64(),
             t.elapsed(),
         );
