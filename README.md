@@ -160,6 +160,10 @@ Score-Verteilung steht in der Web-UI und hilft beim Einstellen.
 **Zusammenfassen:** Tritt dieselbe Art beim selben Host innerhalb einer Stunde erneut auf, wird die bestehende Zeile
 verlängert („3×“) statt eine neue anzulegen. Die stärkste Messung bestimmt den Text.
 
+**Mails** sind zunächst aus. Mit `mail = true` gehen neue Auffälligkeiten ab `mail_min_severity` (Standard `high`) an die
+Admins aus `[email]`, begrenzt durch `alerts.max_mails_per_hour`. Erst einschalten, wenn die Schwellen zum eigenen Netz
+passen.
+
 ### Netz-Regeln
 
 Mit vielen festen Netzen lässt sich genau sagen, wer mit wem reden darf. Dazu werden Netze als **Zonen** benannt und
@@ -212,9 +216,90 @@ ports = [25]
 - Netz-Regeln ersetzen keine Firewall-Regeln: Sie melden, was durchgeht, sie blockieren nichts. Gemeldet wird am Ende
   des Fensters (Standard 10 min).
 
-**Mails** sind zunächst aus. Mit `mail = true` gehen neue Auffälligkeiten ab `mail_min_severity` (Standard `high`) an die
-Admins aus `[email]`, begrenzt durch `alerts.max_mails_per_hour`. Erst einschalten, wenn die Schwellen zum eigenen Netz
-passen.
+### Beispiel: Schülernetz und Verwaltung
+
+Eine Schule hat drei Netze, die interessieren (die Adressen sind Beispiele, die eigenen stehen in der pfSense unter
+*Interfaces*):
+
+| Netz | Adressen | Vergabe |
+|---|---|---|
+| Schülernetz (WLAN und Schul-PCs) | `172.20.8.0/22` | DHCP, Adressen wechseln |
+| Verwaltung, Sekretariat | `172.20.1.0/24` | feste Adressen |
+| Verwaltung, Direktion | `172.20.2.0/24` | feste Adressen |
+
+Ziel: Das Schülernetz bekommt nur ein Gruppenprofil (eine IP ist morgen ein anderes Gerät), und jede Verbindung aus dem
+Schülernetz in die Verwaltung wird gemeldet. Dazu in `config.toml`:
+
+```toml
+[anomaly]
+# Schülernetz per DHCP: nur Gruppenprofil, kein Profil je IP
+dynamic_networks = ["172.20.8.0/22"]
+
+# … weitere Einstellungen von [anomaly] hier, VOR den Zonen und Regeln …
+
+[[anomaly.zones]]
+name = "schueler"
+networks = ["172.20.8.0/22"]
+
+[[anomaly.zones]]
+name = "verwaltung"
+networks = ["172.20.1.0/24", "172.20.2.0/24"]   # eine Zone darf mehrere Netze haben
+
+# Schülernetz → Verwaltung: immer melden (Schwere hoch)
+[[anomaly.rules]]
+from = "schueler"
+to = "verwaltung"
+```
+
+**Wohin in der Datei:** Gibt es schon einen Abschnitt `[anomaly]`, kommt `dynamic_networks` dort hinein, ohne zweite
+`[anomaly]`-Zeile. Die Blöcke `[[anomaly.zones]]` und `[[anomaly.rules]]` kommen ans **Ende der Datei**: In TOML gehört
+alles nach einem solchen Block zu diesem Block, eine Einstellung dahinter landet sonst in der letzten Regel. Der Start
+bricht dann mit einer Fehlermeldung ab.
+
+**Was passiert:** Nach dem Neustart zeigt die Statuskarte unter *anomalien* „netz-regeln: 1 regeln, 2 zonen“. Versucht
+ein Schüler-PC etwa, eine Freigabe im Sekretariat zu öffnen, erscheint am Ende des Fensters eine Zeile wie
+
+```text
+● hoch   netz-regel   172.20.9.41   netz-regel schueler → verwaltung: 3 verbindungen zu 172.20.1.10, ports 139, 445
+```
+
+Klick auf die IP öffnet die Flow-Suche mit allen Verbindungen dieses Geräts. Die Antworten der Verwaltung an den
+Schüler-PC lösen keine Meldung aus, gezählt wird nur die Anfrage.
+
+**Typische Erweiterungen:**
+
+- *Ein Dienst in der Verwaltung ist für Schüler erlaubt*, z. B. ein Drucker (IPP, Port 631). Die `allow`-Regel muss
+  **vor** der Meldung stehen, weil die erste passende Regel entscheidet:
+
+  ```toml
+  [[anomaly.rules]]
+  from = "schueler"
+  to = "verwaltung"
+  ports = [631]
+  action = "allow"
+
+  [[anomaly.rules]]
+  from = "schueler"
+  to = "verwaltung"
+  ```
+
+- *Die Gegenrichtung als Warnung sehen.* Bewusst nicht im Grundbeispiel: Admins und Software zur Klassenraumsteuerung
+  greifen oft auf Schüler-Geräte zu, das würde ständig anschlagen.
+
+  ```toml
+  [[anomaly.rules]]
+  from = "verwaltung"
+  to = "schueler"
+  severity = "warn"
+  ```
+
+- *Keine Profile je Gerät in der Verwaltung* (siehe [Datenschutz](#empfehlungen-für-schulen)): die Verwaltungsnetze
+  zusätzlich in `dynamic_networks` aufnehmen. Die Netz-Regel funktioniert weiter, nur die Statistik vergleicht dort mit
+  dem Gruppenprofil statt mit jedem einzelnen Gerät.
+
+  ```toml
+  dynamic_networks = ["172.20.8.0/22", "172.20.1.0/24", "172.20.2.0/24"]
+  ```
 
 ## Konfiguration
 
