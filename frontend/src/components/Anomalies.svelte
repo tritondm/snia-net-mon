@@ -4,7 +4,7 @@
   import Window from './Window.svelte';
   import { api } from '../lib/api.js';
   import { searchFor } from '../lib/state.svelte.js';
-  import { fmtBytes, fmtDate, fmtNum, flag } from '../lib/format.js';
+  import { fmtBytes, fmtDate, fmtNum, flag, geoTitle } from '../lib/format.js';
 
   let status = $state(null);
   let rows = $state([]);
@@ -25,6 +25,16 @@
     ['30d', '30 tage', 30 * DAY, DAY],
   ];
   const range = () => RANGES.find((r) => r[0] === filter.range) ?? RANGES[0];
+
+  const IP_RE = /(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7})/gi;
+  /** Text in Stücke zerlegen, IPs mit GeoIP-Daten (aus row.geo) als eigene Stücke. */
+  function ipSegments(text, geo) {
+    if (!geo) return [{ text }];
+    return String(text)
+      .split(IP_RE)
+      .filter((t) => t !== '')
+      .map((t) => (geo[t] ? { text: t, geo: geo[t] } : { text: t }));
+  }
 
   /** Beginn der Zeitleiste, ausgerichtet auf volle Stunden bzw. Tage in Ortszeit; der letzte Abschnitt enthält jetzt. */
   function timelineStart([, , span, bucket]) {
@@ -108,6 +118,12 @@
   const fmtInterval = (s) => (s >= 90 ? `${(s / 60).toFixed(1)} min` : `${Math.round(s)} s`);
   const fmtTypical = (f) => (f.bytes ? fmtBytes(f.typical) : f.percent ? `${Math.round(f.typical * 100)} %` : fmtNum(f.typical));
 </script>
+
+{#snippet ipText(text, geo)}
+  {#each ipSegments(text, geo) as seg}{#if seg.geo}{seg.text}<span class="text-ctp-overlay1" title={geoTitle(seg.geo)}
+        >{' '}({seg.geo.cc ? `${flag(seg.geo.cc)} ${seg.geo.cc}` : ''}{seg.geo.cc && seg.geo.org ? ', ' : ''}{seg.geo.org ?? (seg.geo.asn ? `AS${seg.geo.asn}` : '')})</span
+      >{:else}{seg.text}{/if}{/each}
+{/snippet}
 
 <div class="grid gap-2.5">
   {#if disabled}
@@ -250,7 +266,7 @@
               </td>
               <td class="text-ctp-overlay1">{r.group}</td>
               <td class="whitespace-normal text-ctp-text">
-                {#if r.kind === 'country'}<span class="mr-1">{flag(r.detail?.cc)}</span>{/if}{r.title}
+                {#if r.kind === 'country'}<span class="mr-1">{flag(r.detail?.cc)}</span>{/if}{#if r.kind === 'beacon'}{r.title}{:else}{@render ipText(r.title, r.geo)}{/if}
                 {#if r.kind === 'stat' && r.detail?.ml_score != null}
                   <span
                     class="chip ml-1 !py-0 {r.detail.ml_agrees ? 'border-ctp-mauve/60 text-ctp-mauve' : 'text-ctp-overlay0'}"
@@ -282,16 +298,16 @@
                   {:else if r.kind === 'scan'}
                     <div>{r.detail.attempts} versuche · {r.detail.hosts} ziel-hosts · {r.detail.ports} ports</div>
                     <div class="mt-1 text-ctp-overlay1">ports: {(r.detail.sample_ports ?? []).join(', ')}</div>
-                    <div class="mt-1 text-ctp-overlay1">ziele (auszug): {(r.detail.sample_hosts ?? []).join(', ')}</div>
+                    <div class="mt-1 text-ctp-overlay1">ziele (auszug): {@render ipText((r.detail.sample_hosts ?? []).join(', '), r.geo)}</div>
                   {:else if r.kind === 'dns'}
                     <div class="flex flex-wrap gap-2">
-                      {#each r.detail.resolvers ?? [] as res}<span class="chip">{res.ip} · {res.flows} flows</span>{/each}
+                      {#each r.detail.resolvers ?? [] as res}<span class="chip">{@render ipText(res.ip, r.geo)} · {res.flows} flows</span>{/each}
                     </div>
                     <div class="mt-1 text-ctp-overlay0">erlaubte externe resolver: [anomaly] dns_servers</div>
                   {:else if r.kind === 'policy'}
                     <div>regel <span class="text-ctp-text">{r.detail.rule}</span> ({r.detail.from} → {r.detail.to}) · {r.detail.flows} verbindungen · {fmtBytes(r.detail.bytes)}</div>
                     {#if r.detail.ports?.length}<div class="mt-1 text-ctp-overlay1">ports: {r.detail.ports.join(', ')}</div>{/if}
-                    <div class="mt-1 text-ctp-overlay1">ziele{r.detail.peers > 20 ? ' (auszug)' : ''}: {(r.detail.sample_peers ?? []).join(', ')}</div>
+                    <div class="mt-1 text-ctp-overlay1">ziele{r.detail.peers > 20 ? ' (auszug)' : ''}: {@render ipText((r.detail.sample_peers ?? []).join(', '), r.geo)}</div>
                   {:else if r.kind === 'beacon'}
                     <div>
                       ziel <span class="text-ctp-text">{r.detail.peer}:{r.detail.port}/{r.detail.proto}</span>

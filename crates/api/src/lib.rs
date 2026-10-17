@@ -176,8 +176,48 @@ impl AppState {
     }
 }
 
-async fn anomalies(State(s): State<AppState>, Query(f): Query<anomaly::EventFilter>) -> ApiResult<Vec<anomaly::EventRow>> {
-    Ok(Json(s.anomaly()?.events(f).await?))
+#[derive(Serialize)]
+struct EventWithGeo {
+    #[serde(flatten)]
+    row: anomaly::EventRow,
+    /// Land und Anbieter der externen IPs in Titel und Details
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    geo: HashMap<String, GeoInfo>,
+}
+
+async fn anomalies(State(s): State<AppState>, Query(f): Query<anomaly::EventFilter>) -> ApiResult<Vec<EventWithGeo>> {
+    let rows = s.anomaly()?.events(f).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| {
+                let mut ips = Vec::new();
+                public_ips(&row.title, &mut ips);
+                collect_ips(&row.detail, &mut ips);
+                let geo = ips.into_iter().filter_map(|ip| Some((ip.to_string(), s.geo.lookup_opt(ip)?))).collect();
+                EventWithGeo { row, geo }
+            })
+            .collect(),
+    ))
+}
+
+fn collect_ips(v: &serde_json::Value, out: &mut Vec<std::net::IpAddr>) {
+    match v {
+        serde_json::Value::String(text) => public_ips(text, out),
+        serde_json::Value::Array(items) => items.iter().for_each(|i| collect_ips(i, out)),
+        serde_json::Value::Object(map) => map.values().for_each(|i| collect_ips(i, out)),
+        _ => {}
+    }
+}
+
+/// Öffentliche IPs in einem Text, auch mit Port ("1.2.3.4:443").
+fn public_ips(text: &str, out: &mut Vec<std::net::IpAddr>) {
+    for token in text.split(|c: char| !(c.is_ascii_hexdigit() || c == '.' || c == ':')) {
+        let token = token.trim_matches(|c| c == '.' || c == ':');
+        let ip = token.parse().ok().or_else(|| token.rsplit_once(':').filter(|(ip, _)| ip.contains('.')).and_then(|(ip, _)| ip.parse().ok()));
+        if let Some(ip) = ip.filter(|ip| geo::is_public(*ip) && !out.contains(ip)) {
+            out.push(ip);
+        }
+    }
 }
 
 async fn anomaly_timeline(State(s): State<AppState>, Query(f): Query<anomaly::EventFilter>) -> ApiResult<Vec<anomaly::Bucket>> {
@@ -427,5 +467,18 @@ async fn live_session(mut socket: WebSocket, hub: LiveHub) {
                 _ => {}
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_ips_are_found_in_titles_with_ports() {
+        let mut ips = Vec::new();
+        public_ips("beaconing zu 85.158.227.212:5061 (AT): von 10.1.0.5, dns an 2606:4700:4700::1111 und 8.8.8.8.", &mut ips);
+        let ips: Vec<String> = ips.iter().map(|i| i.to_string()).collect();
+        assert_eq!(ips, ["85.158.227.212", "2606:4700:4700::1111", "8.8.8.8"]);
     }
 }
