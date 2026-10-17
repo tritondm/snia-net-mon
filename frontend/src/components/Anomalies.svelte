@@ -40,7 +40,7 @@
     stat: { label: 'statistik', color: 'text-ctp-peach border-ctp-peach/50', title: 'Merkmale weit über der Baseline' },
     ml: { label: 'ml', color: 'text-ctp-mauve border-ctp-mauve/50', title: 'nur der Isolation Forest schlägt an' },
     scan: { label: 'portscan', color: 'text-ctp-red border-ctp-red/50', title: 'viele fehlgeschlagene TCP-Verbindungsversuche' },
-    dns: { label: 'externes dns', color: 'text-ctp-yellow border-ctp-yellow/50', title: 'DNS an externe Resolver statt an die pfSense' },
+    dns: { label: 'externes dns', color: 'text-ctp-yellow border-ctp-yellow/50', title: 'DNS an externe Resolver statt an den eigenen' },
     country: { label: 'neues land', color: 'text-ctp-sapphire border-ctp-sapphire/50', title: 'erste Verbindung der Gruppe in dieses Land' },
     policy: { label: 'netz-regel', color: 'text-ctp-pink border-ctp-pink/50', title: 'Verstoß gegen eine Netz-Regel aus [anomaly] rules' },
     beacon: { label: 'beaconing', color: 'text-ctp-lavender border-ctp-lavender/50', title: 'regelmäßige Verbindungen zum selben externen Ziel' },

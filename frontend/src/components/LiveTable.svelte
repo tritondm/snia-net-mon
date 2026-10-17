@@ -113,7 +113,7 @@
           </tr>
         {:else}
           <tr><td colspan="10" class="py-10 text-center text-ctp-overlay0">
-            {#if ui.range}{rangeLoading ? 'lädt …' : 'keine Verbindungen in diesem Zeitbereich'}{:else}keine aktiven Verbindungen – sendet die pfSense NetFlow an Port 2055?{/if}
+            {#if ui.range}{rangeLoading ? 'lädt …' : 'keine Verbindungen in diesem Zeitbereich'}{:else}keine aktiven Verbindungen – kommt NetFlow/IPFIX an Port 2055 an?{/if}
           </td></tr>
         {/each}
       </tbody>

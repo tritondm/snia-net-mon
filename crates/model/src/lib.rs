@@ -26,7 +26,7 @@ pub struct FlowRecord {
     pub tcp_flags: u8,
     pub in_if: u32,
     pub out_if: u32,
-    /// Absender des Export-Pakets (die pfSense).
+    /// Absender des Export-Pakets (Firewall, Router, Probe).
     pub exporter: IpAddr,
     /// Verkehrsrichtung relativ zu den internen Netzen (setzt der Collector, siehe [`LocalNetworks`]).
     pub direction: Direction,

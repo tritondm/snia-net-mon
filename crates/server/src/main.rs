@@ -2,7 +2,7 @@
 //!
 //! Datenfluss:
 //! ```text
-//! pfSense (softflowd) ──UDP 2055──▶ collector ──batch──┬──▶ db (Writer-Thread → SQLite, Retention-Task)
+//! Exporter (v9/IPFIX) ──UDP 2055──▶ collector ──batch──┬──▶ db (Writer-Thread → SQLite, Retention-Task)
 //!   (ausgenommene Netze werden hier verworfen)         │      └─ nach 48 h ──▶ Historie ──ab 50 GB──▶ zstd-Archiv
 //!                                                      ├──▶ api::LiveHub ──WebSocket──▶ Browser
 //!                                                      ├──▶ alert (Upload > Schwelle je Verbindung) ──SMTP──▶ Admins

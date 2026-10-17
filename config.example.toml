@@ -13,7 +13,7 @@ api_token = ""
 # Interne Netze – daraus ergibt sich die Richtung jedes Flows:
 #   extern → intern = "in" (Download), intern → extern = "out" (Upload), intern ↔ intern = "internal"
 # Standard sind die privaten Bereiche. Eigene öffentliche Netze ergänzen: das IPv6-Präfix vom Provider
-# (z. B. "2a02:1234:5678::/48") und die WAN-Adresse der pfSense (für eingehende Verbindungen auf die Firewall selbst).
+# (z. B. "2a02:1234:5678::/48") und die öffentliche Adresse des Exporters (für eingehende Verbindungen auf ihn selbst).
 local_networks = [
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
     "169.254.0.0/16", "127.0.0.0/8", "fc00::/7", "fe80::/10",
@@ -27,7 +27,7 @@ exclude_networks = [
 ]
 
 [collector]
-# Hierhin schickt die pfSense (softflowd) NetFlow v9 oder IPFIX.
+# Hierhin schicken die Exporter (Firewall, Router, softflowd …) NetFlow v9 oder IPFIX.
 listen = "0.0.0.0:2055"
 # Mehrere Worker verteilen die Last über SO_REUSEPORT (ein Exporter landet immer beim selben Worker).
 workers = 2
@@ -109,7 +109,7 @@ ignore = []
 # Portscan: so viele fehlgeschlagene TCP-Verbindungsversuche (SYN ohne ACK) zu verschiedenen Ziel/Port-Paaren
 # in einem Fenster; 0 = aus.
 scan_threshold = 100
-# DNS (Port 53/853) an externe Resolver statt an die pfSense melden; erlaubte externe Resolver in dns_servers.
+# DNS (Port 53/853) an externe Resolver statt an den eigenen melden; erlaubte externe Resolver in dns_servers.
 dns_rule = true
 dns_servers = []
 # Erste Verbindung einer Netzgruppe in ein Land, das sie bisher nie kontaktiert hat (braucht GeoIP).

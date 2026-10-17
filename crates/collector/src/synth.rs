@@ -1,7 +1,7 @@
 //! Synthetische NetFlow-v9-/IPFIX-Pakete: Encoder und ein einfaches Verkehrsmodell.
 //!
 //! Wird von den Parser-Tests (Roundtrip) und vom Demo-Generator `flowgen` benutzt, damit sich die komplette Pipeline
-//! ohne echte pfSense testen lässt. Die erzeugten Pakete sind standardkonform und werden über echtes UDP verschickt.
+//! ohne echten Exporter testen lässt. Die erzeugten Pakete sind standardkonform und werden über echtes UDP verschickt.
 
 use model::FlowRecord;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

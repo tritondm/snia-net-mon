@@ -1,6 +1,6 @@
 [package]
 name = "flowgen"
-description = "Demo-Generator: sendet synthetische NetFlow-v9-/IPFIX-Pakete per UDP (zum Testen ohne pfSense)"
+description = "Demo-Generator: sendet synthetische NetFlow-v9-/IPFIX-Pakete per UDP (zum Testen ohne echten Exporter)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
