@@ -172,6 +172,9 @@ struct AnomalySection {
     timezone: String,
     mail: bool,
     mail_min_severity: String,
+    /// Netz-Regeln: benannte Zonen und geordnete Regeln (`[[anomaly.zones]]`, `[[anomaly.rules]]`)
+    zones: Vec<anomaly::policy::ZoneConfig>,
+    rules: Vec<anomaly::policy::RuleConfig>,
 }
 
 impl Default for AnomalySection {
@@ -208,6 +211,8 @@ impl Default for AnomalySection {
             timezone: String::new(),
             mail: d.mail,
             mail_min_severity: d.mail_min_severity.name().into(),
+            zones: Vec::new(),
+            rules: Vec::new(),
         }
     }
 }
@@ -250,6 +255,7 @@ impl AnomalySection {
             mail_min_severity: anomaly::Severity::parse(&self.mail_min_severity)
                 .ok_or_else(|| anyhow::anyhow!("anomaly.mail_min_severity: erlaubt sind info, warn, high – nicht {:?}", self.mail_min_severity))?,
             max_mails_per_hour,
+            policy: anomaly::policy::Policy::new(&self.zones, &self.rules).map_err(|e| anyhow::anyhow!("anomaly.{e}"))?,
         })
     }
 }

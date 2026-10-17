@@ -20,10 +20,12 @@ pub enum Kind {
     Scan,
     Dns,
     Country,
+    /// Verstoß gegen eine Netz-Regel
+    Policy,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [Kind::Stat, Kind::Ml, Kind::Scan, Kind::Dns, Kind::Country];
+    pub const ALL: [Kind; 6] = [Kind::Stat, Kind::Ml, Kind::Scan, Kind::Dns, Kind::Country, Kind::Policy];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -32,6 +34,7 @@ impl Kind {
             Kind::Scan => "scan",
             Kind::Dns => "dns",
             Kind::Country => "country",
+            Kind::Policy => "policy",
         }
     }
 
@@ -77,6 +80,8 @@ pub struct Event {
     pub host: String,
     pub group: String,
     pub kind: Kind,
+    /// Unterscheidet Auffälligkeiten derselben Art beim selben Host (z. B. die Netz-Regel) beim Zusammenfassen
+    pub tag: String,
     pub severity: Severity,
     /// Stärke zum Vergleichen gleichartiger Ereignisse (Z-Score, ML-Score, Anzahl Versuche …)
     pub score: f64,
@@ -351,6 +356,7 @@ mod tests {
             host: "10.0.0.5".into(),
             group: "10.0.0.0/24".into(),
             kind,
+            tag: String::new(),
             severity,
             score: 1.0,
             title: "test".into(),

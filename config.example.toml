@@ -130,6 +130,45 @@ mail = false
 # Mindest-Schwere für Mails: info, warn oder high
 mail_min_severity = "high"
 
+# Netz-Regeln: Zonen benennen und festlegen, welche Verbindungen gemeldet werden. Die Regeln werden der Reihe nach
+# geprüft, die erste passende entscheidet: action = "alert" (Standard) meldet, "allow" erlaubt still. Flows ohne
+# passende Regel bleiben unbeachtet. from/to: Zonenname, "extern" (außerhalb von network.local_networks) oder "*".
+# ports: nur diese Dienste (Zielport), leer = alle. severity: info, warn oder high (Standard).
+# Gezählt wird nur die Anfrage einer Verbindung, nicht die Antwort. Netz-Regeln melden ab dem Start, ohne Lernphase.
+#
+# [[anomaly.zones]]
+# name = "schueler"
+# networks = ["10.20.0.0/22"]
+#
+# [[anomaly.zones]]
+# name = "verwaltung"
+# networks = ["10.0.5.0/24"]
+#
+# [[anomaly.zones]]
+# name = "server"
+# networks = ["10.0.10.0/28"]
+#
+# [[anomaly.rules]]
+# from = "schueler"
+# to = "server"
+# ports = [53, 443, 445]
+# action = "allow"
+#
+# [[anomaly.rules]]
+# from = "schueler"
+# to = "server"
+# severity = "warn"
+#
+# [[anomaly.rules]]
+# from = "schueler"
+# to = "verwaltung"
+#
+# [[anomaly.rules]]
+# name = "smtp direkt ins internet"
+# from = "*"
+# to = "extern"
+# ports = [25]
+
 [email]
 # SMTP-Server für Mails an die Admins. Leer = kein Mailversand. Testen mit: snia-net-mon --test-mail
 smtp_host = ""

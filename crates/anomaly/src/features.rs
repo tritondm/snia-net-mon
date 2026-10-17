@@ -69,10 +69,20 @@ impl HostWindow {
     }
 }
 
-/// Welche Hosts ausgewertet werden und welche externen Resolver erlaubt sind.
+/// Welche Hosts ausgewertet werden, welche externen Resolver erlaubt sind und welche Netz-Regeln gelten.
 pub struct Filters {
     pub ignore: LocalNetworks,
     pub dns_servers: LocalNetworks,
+    pub policy: crate::policy::Policy,
+}
+
+/// Verstöße gegen eine Netz-Regel durch einen Host in einem Fenster.
+#[derive(Debug, Default)]
+pub struct PolicyHit {
+    pub peers: HashSet<IpAddr>,
+    pub ports: HashSet<u16>,
+    pub flows: u64,
+    pub bytes: u64,
 }
 
 /// Alle Hosts eines Zeitfensters.
@@ -82,15 +92,30 @@ pub struct Window {
     /// und fließen nicht in Baseline und Statistik ein.
     pub partial: bool,
     pub hosts: HashMap<IpAddr, HostWindow>,
+    /// (Regel-Index, interner Host) → Verstöße
+    pub policy: HashMap<(usize, IpAddr), PolicyHit>,
     countries: HashMap<IpAddr, Option<String>>,
 }
 
 impl Window {
     pub fn new(start_ms: i64, partial: bool) -> Self {
-        Self { start_ms, partial, hosts: HashMap::new(), countries: HashMap::new() }
+        Self { start_ms, partial, hosts: HashMap::new(), policy: HashMap::new(), countries: HashMap::new() }
     }
 
     pub fn add(&mut self, flow: &FlowRecord, filters: &Filters, geo: &GeoLookup) {
+        // Netz-Regeln gelten unabhängig von `ignore`; gemeldet wird beim internen Beteiligten (bei extern → intern das Ziel)
+        if let Some(rule) = filters.policy.check(flow) {
+            let (host, peer) = if flow.direction == Direction::In { (flow.dst_ip, flow.src_ip) } else { (flow.src_ip, flow.dst_ip) };
+            let hit = self.policy.entry((rule, host)).or_default();
+            if hit.peers.len() < SET_CAP {
+                hit.peers.insert(peer);
+            }
+            if hit.ports.len() < SET_CAP && matches!(flow.proto, 6 | 17 | 132) {
+                hit.ports.insert(flow.dst_port);
+            }
+            hit.flows += 1;
+            hit.bytes = hit.bytes.saturating_add(flow.bytes);
+        }
         let (host, peer) = match flow.direction {
             Direction::Out | Direction::Internal => (flow.src_ip, flow.dst_ip),
             Direction::In => (flow.dst_ip, flow.src_ip),
@@ -157,7 +182,11 @@ mod tests {
 
     #[test]
     fn flows_are_counted_for_the_internal_host() {
-        let filters = Filters { ignore: LocalNetworks::parse(&["192.168.1.99"]).unwrap(), dns_servers: LocalNetworks::parse(&["9.9.9.9"]).unwrap() };
+        let filters = Filters {
+            ignore: LocalNetworks::parse(&["192.168.1.99"]).unwrap(),
+            dns_servers: LocalNetworks::parse(&["9.9.9.9"]).unwrap(),
+            policy: Default::default(),
+        };
         let geo = GeoLookup::disabled();
         let mut w = Window::new(0, false);
         w.add(&flow("192.168.1.10", "203.0.113.5", 50000, 443, 1000, 0x1b, Direction::Out), &filters, &geo);

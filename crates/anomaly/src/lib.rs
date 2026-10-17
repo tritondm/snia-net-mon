@@ -5,6 +5,7 @@
 //!   auf Log-Werten
 //! * [`forest`] – Variante 2: Isolation Forest auf denselben Merkmalen als „zweite Meinung“
 //! * feste Regeln: Portscan (SYN ohne ACK), DNS an externe Resolver, erstes Land einer Gruppe
+//! * [`policy`] – Netz-Regeln: Zonen und eine geordnete Regelliste (z. B. „schüler → verwaltung“ melden)
 //! * [`store`] – `anomaly.db`: Baselines, Trainingsvektoren (ohne IP), gemeldete Auffälligkeiten
 //!
 //! Der Task hängt wie der Upload-Alarm am Flow-Strom des Collectors, sammelt ein Fenster (Standard 10 min) und wertet es
@@ -14,6 +15,7 @@ pub mod baseline;
 mod engine;
 pub mod features;
 pub mod forest;
+pub mod policy;
 pub mod store;
 
 pub use engine::{MlStatus, Status, WindowInfo};
@@ -97,6 +99,8 @@ pub struct AnomalyConfig {
     pub mail: bool,
     pub mail_min_severity: Severity,
     pub max_mails_per_hour: u32,
+    /// Netz-Regeln (leer = keine)
+    pub policy: policy::Policy,
 }
 
 impl Default for AnomalyConfig {
@@ -128,6 +132,7 @@ impl Default for AnomalyConfig {
             mail: false,
             mail_min_severity: Severity::High,
             max_mails_per_hour: 20,
+            policy: policy::Policy::default(),
         }
     }
 }
@@ -168,6 +173,7 @@ pub fn spawn(
         learning_days = config.learning_days,
         timezone = %engine.timezone_name(),
         ml = config.ml,
+        policy_rules = config.policy.rules.len(),
         mail = config.mail && mailer.is_some(),
         "Anomalie-Erkennung aktiv"
     );
@@ -178,7 +184,7 @@ pub fn spawn(
     let engine = handle.engine.clone();
     let task = tokio::spawn(async move {
         let window_ms = config.window.as_millis() as i64;
-        let filters = Filters { ignore: config.ignore.clone(), dns_servers: config.dns_servers.clone() };
+        let filters = Filters { ignore: config.ignore.clone(), dns_servers: config.dns_servers.clone(), policy: config.policy.clone() };
         let new_window = |now: i64| {
             let start = now - now.rem_euclid(window_ms);
             Window::new(start, now - start > window_ms / 10)
@@ -221,6 +227,7 @@ fn kind_label(kind: Kind) -> &'static str {
         Kind::Scan => "portscan",
         Kind::Dns => "externes dns",
         Kind::Country => "neues land",
+        Kind::Policy => "netz-regel",
     }
 }
 

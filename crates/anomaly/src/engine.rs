@@ -2,7 +2,7 @@
 
 use crate::AnomalyConfig;
 use crate::baseline::{Baselines, SlotKind};
-use crate::features::{FEATURES, HostWindow, NAMES, Window, is_bytes};
+use crate::features::{FEATURES, HostWindow, NAMES, PolicyHit, Window, is_bytes};
 use crate::forest::{self, Forest, Rng, SHARE, TIME, Vector};
 use crate::store::{Counts, Event, EventFilter, EventRow, Kind, Severity, Store};
 use jiff::tz::TimeZone;
@@ -133,6 +133,9 @@ pub struct Status {
     pub ml: MlStatus,
     pub counts_24h: Counts,
     pub mail: bool,
+    /// Anzahl Netz-Regeln und Zonen
+    pub policy_rules: usize,
+    pub policy_zones: usize,
 }
 
 pub(crate) struct Engine {
@@ -144,7 +147,7 @@ pub(crate) struct Engine {
     countries: HashMap<String, HashSet<String>>,
     model: Option<Model>,
     started_ms: i64,
-    open: HashMap<(String, Kind), Open>,
+    open: HashMap<(String, Kind, String), Open>,
     last_window: Option<WindowInfo>,
     last_prune_ms: i64,
     last_train_attempt_ms: i64,
@@ -250,6 +253,7 @@ impl Engine {
                             host: host.clone(),
                             group: group.clone(),
                             kind: Kind::Country,
+                            tag: cc.clone(),
                             severity: Severity::Info,
                             score: *bytes as f64,
                             title: format!("erste verbindung der gruppe {group} nach {cc} ({} hochgeladen)", fmt_bytes(*bytes as f64)),
@@ -257,6 +261,14 @@ impl Engine {
                         });
                     }
                 }
+            }
+        }
+
+        let mut hits: Vec<_> = window.policy.iter().collect();
+        hits.sort_by_key(|((rule, host), _)| (*rule, *host));
+        for ((rule, host), hit) in hits {
+            if let Some(rule) = self.cfg.policy.rules.get(*rule) {
+                found.push(policy_event(end, &host.to_string(), &self.groups.of(*host), rule, hit));
             }
         }
 
@@ -291,7 +303,7 @@ impl Engine {
 
     /// Auffälligkeit speichern oder eine laufende desselben Hosts verlängern. `true` = neu angelegt.
     fn record(&mut self, event: &Event) -> rusqlite::Result<bool> {
-        let key = (event.host.clone(), event.kind);
+        let key = (event.host.clone(), event.kind, event.tag.clone());
         if event.kind != Kind::Country
             && let Some(open) = self.open.get_mut(&key)
             && event.ts - open.last_ts <= MERGE_GAP_MS
@@ -362,6 +374,8 @@ impl Engine {
             },
             counts_24h: self.store.counts(now - DAY_MS)?,
             mail: self.cfg.mail,
+            policy_rules: self.cfg.policy.rules.len(),
+            policy_zones: self.cfg.policy.zones,
         })
     }
 }
@@ -393,6 +407,7 @@ fn stat_event(ts: i64, host: &str, group: &str, mut hits: Vec<Hit>, slot: Option
         host: host.into(),
         group: group.into(),
         kind: Kind::Stat,
+        tag: String::new(),
         severity,
         score: top.z,
         title,
@@ -421,6 +436,7 @@ fn ml_event(ts: i64, host: &str, group: &str, score: f64, v: &Vector, model: &Mo
         host: host.into(),
         group: group.into(),
         kind: Kind::Ml,
+        tag: String::new(),
         severity: Severity::Info,
         score,
         title: format!("ungewöhnliches gesamtmuster (ml-score {score:.2}) – {reason}"),
@@ -470,6 +486,7 @@ fn scan_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
         host: host.into(),
         group: group.into(),
         kind: Kind::Scan,
+        tag: String::new(),
         severity: Severity::High,
         score: attempts as f64,
         title: format!("portscan: {attempts} fehlgeschlagene verbindungsversuche zu {} hosts auf {} ports", hosts.len(), ports.len()),
@@ -493,12 +510,46 @@ fn dns_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
         host: host.into(),
         group: group.into(),
         kind: Kind::Dns,
+        tag: String::new(),
         severity: Severity::Warn,
         score: total as f64,
         title: format!("dns an externen resolver {} ({} flows){more}", resolvers[0].0, resolvers[0].1),
         detail: json!({
             "resolvers": resolvers.iter().take(20).map(|(ip, n)| json!({ "ip": ip.to_string(), "flows": n })).collect::<Vec<_>>(),
             "flows": total,
+        }),
+    }
+}
+
+fn policy_event(ts: i64, host: &str, group: &str, rule: &crate::policy::Rule, hit: &PolicyHit) -> Event {
+    let mut ports: Vec<u16> = hit.ports.iter().copied().collect();
+    ports.sort_unstable();
+    let mut peers: Vec<String> = hit.peers.iter().map(IpAddr::to_string).collect();
+    peers.sort();
+    let port_text = match ports.len() {
+        0 => String::new(),
+        1..=5 => format!(", ports {}", ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")),
+        n => format!(", {n} ports"),
+    };
+    let peer_text = if peers.len() == 1 { peers[0].clone() } else { format!("{} zielen", peers.len()) };
+    Event {
+        ts,
+        host: host.into(),
+        group: group.into(),
+        kind: Kind::Policy,
+        tag: rule.name.clone(),
+        severity: rule.severity,
+        score: hit.flows as f64,
+        title: format!("netz-regel {}: {} verbindungen zu {peer_text}{port_text}", rule.name, hit.flows),
+        detail: json!({
+            "rule": rule.name,
+            "from": rule.from,
+            "to": rule.to,
+            "flows": hit.flows,
+            "bytes": hit.bytes,
+            "peers": hit.peers.len(),
+            "sample_peers": peers.iter().take(20).collect::<Vec<_>>(),
+            "ports": ports.iter().take(50).collect::<Vec<_>>(),
         }),
     }
 }
@@ -560,7 +611,7 @@ mod tests {
     }
 
     fn filters() -> Filters {
-        Filters { ignore: LocalNetworks::none(), dns_servers: LocalNetworks::none() }
+        Filters { ignore: LocalNetworks::none(), dns_servers: LocalNetworks::none(), policy: Default::default() }
     }
 
     /// Normaler Verkehr: 30 Clients in 10.0.1.0/24, jeder ein paar MiB zu wenigen Servern.
@@ -653,6 +704,53 @@ mod tests {
         assert!(!status.learning);
         assert_eq!(status.groups, 1);
         assert!(status.ml.trained_ms.is_some());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn policy_violations_are_reported_per_rule_and_merged() {
+        use crate::policy::{Action, Policy, RuleConfig, ZoneConfig};
+        let zone = |name: &str, net: &str| ZoneConfig { name: name.into(), networks: vec![net.into()] };
+        let rule = |from: &str, to: &str, severity: &str| RuleConfig {
+            name: String::new(),
+            from: from.into(),
+            to: to.into(),
+            ports: vec![],
+            action: Action::Alert,
+            severity: severity.into(),
+        };
+        let policy = Policy::new(
+            &[zone("schueler", "10.20.0.0/22"), zone("verwaltung", "10.0.5.0/24"), zone("server", "10.0.10.0/28")],
+            &[rule("schueler", "verwaltung", "high"), rule("schueler", "server", "warn")],
+        )
+        .unwrap();
+        let cfg = AnomalyConfig { learning_days: 7, policy: policy.clone(), ..config("policy") };
+        let path = cfg.db_path.clone();
+        let mut engine = Engine::open(cfg, 0).unwrap();
+        let filters = Filters { ignore: LocalNetworks::none(), dns_servers: LocalNetworks::none(), policy };
+        let geo = geo::GeoLookup::disabled();
+        let window = |start: i64| {
+            let mut w = Window::new(start, false);
+            for port in [445, 3389] {
+                w.add(&flow("10.20.1.5", "10.0.5.7", port, 500, 0x1b, Direction::Internal), &filters, &geo);
+            }
+            // Antwort der Verwaltung zählt nicht
+            w.add(&FlowRecord { src_port: 445, dst_port: 50000, ..flow("10.0.5.7", "10.20.1.5", 0, 9000, 0x1b, Direction::Internal) }, &filters, &geo);
+            w.add(&flow("10.20.1.5", "10.0.10.2", 22, 500, 0x1b, Direction::Internal), &filters, &geo);
+            w
+        };
+        let created = engine.finish_window(window(0), 600_000).unwrap();
+        let policy: Vec<&Event> = created.iter().filter(|e| e.kind == Kind::Policy).collect();
+        assert_eq!(policy.len(), 2, "eine Meldung je Regel, auch während der Lernphase: {created:?}");
+        assert_eq!(policy[0].title, "netz-regel schueler → verwaltung: 2 verbindungen zu 10.0.5.7, ports 445, 3389");
+        assert_eq!((policy[0].severity, policy[0].host.as_str(), policy[0].group.as_str()), (Severity::High, "10.20.1.5", "10.20.1.0/24"));
+        assert_eq!(policy[1].severity, Severity::Warn);
+        // nächstes Fenster: beide Zeilen werden verlängert, nicht neu angelegt
+        let created = engine.finish_window(window(600_000), 1_200_000).unwrap();
+        assert!(created.iter().all(|e| e.kind != Kind::Policy));
+        let rows = engine.events(&EventFilter { kind: Some("policy".into()), ..Default::default() }).unwrap();
+        assert_eq!(rows.iter().map(|r| r.count).collect::<Vec<_>>(), vec![2, 2]);
+        assert_eq!(engine.status(1_200_000).unwrap().policy_rules, 2);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
