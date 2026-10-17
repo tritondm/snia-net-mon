@@ -23,6 +23,7 @@
     scan: { label: 'portscan', color: 'text-ctp-red border-ctp-red/50', title: 'viele fehlgeschlagene TCP-Verbindungsversuche' },
     dns: { label: 'externes dns', color: 'text-ctp-yellow border-ctp-yellow/50', title: 'DNS an externe Resolver statt an die pfSense' },
     country: { label: 'neues land', color: 'text-ctp-sapphire border-ctp-sapphire/50', title: 'erste Verbindung der Gruppe in dieses Land' },
+    policy: { label: 'netz-regel', color: 'text-ctp-pink border-ctp-pink/50', title: 'Verstoß gegen eine Netz-Regel aus [anomaly] rules' },
   };
   const SEVERITY = {
     info: ['bg-ctp-overlay0', 'info'],
@@ -78,7 +79,7 @@
             <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-ctp-surface0/70">
               <div class="h-full rounded-full" style="width: {Math.max(1, learnFill * 100)}%; background: linear-gradient(90deg, #94e2d5, #cba6f7)"></div>
             </div>
-            <div class="mt-2 text-[11px] text-ctp-overlay0">portscan und externes dns melden sofort, statistik, ml und neue länder erst nach der lernphase</div>
+            <div class="mt-2 text-[11px] text-ctp-overlay0">portscan, externes dns und netz-regeln melden sofort, statistik, ml und neue länder erst nach der lernphase</div>
           </div>
 
           <div class="rounded-lg border border-ctp-surface0/70 bg-ctp-mantle/40 p-3">
@@ -117,7 +118,9 @@
               <span class="chip"><span class="led bg-ctp-yellow"></span>warnung {status.counts_24h.warn}</span>
               <span class="chip"><span class="led bg-ctp-overlay0"></span>info {status.counts_24h.info}</span>
             </div>
-            <div class="mt-2 text-[11px] text-ctp-overlay0">mails {status.mail ? 'an' : 'aus'} ([anomaly] mail)</div>
+            <div class="mt-2 text-[11px] text-ctp-overlay0">
+              netz-regeln: {status.policy_rules ? `${status.policy_rules} regeln, ${status.policy_zones} zonen` : 'keine'} · mails {status.mail ? 'an' : 'aus'}
+            </div>
           </div>
         </div>
       {/if}
@@ -191,6 +194,10 @@
                       {#each r.detail.resolvers ?? [] as res}<span class="chip">{res.ip} · {res.flows} flows</span>{/each}
                     </div>
                     <div class="mt-1 text-ctp-overlay0">erlaubte externe resolver: [anomaly] dns_servers</div>
+                  {:else if r.kind === 'policy'}
+                    <div>regel <span class="text-ctp-text">{r.detail.rule}</span> ({r.detail.from} → {r.detail.to}) · {r.detail.flows} verbindungen · {fmtBytes(r.detail.bytes)}</div>
+                    {#if r.detail.ports?.length}<div class="mt-1 text-ctp-overlay1">ports: {r.detail.ports.join(', ')}</div>{/if}
+                    <div class="mt-1 text-ctp-overlay1">ziele{r.detail.peers > 20 ? ' (auszug)' : ''}: {(r.detail.sample_peers ?? []).join(', ')}</div>
                   {:else if r.kind === 'country'}
                     <div>{flag(r.detail.cc)} {r.detail.cc} · {fmtBytes(r.detail.bytes)} hochgeladen im ersten fenster</div>
                   {/if}
