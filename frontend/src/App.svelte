@@ -4,6 +4,7 @@
   import FlowSearch from './components/FlowSearch.svelte';
   import PcapAnalyzer from './components/PcapAnalyzer.svelte';
   import ArchiveBrowser from './components/ArchiveBrowser.svelte';
+  import Anomalies from './components/Anomalies.svelte';
   import TokenDialog from './components/TokenDialog.svelte';
   import { ui } from './lib/state.svelte.js';
   import { live } from './lib/live.svelte.js';
@@ -12,8 +13,8 @@
 
   let status = $state(null);
 
-  // Workspace in der URL (#dashboard, #flows, #pcap, #archive) – Links und Zurück-Taste funktionieren
-  const WORKSPACES = ['dashboard', 'flows', 'pcap', 'archive'];
+  // Workspace in der URL (#dashboard, #flows, #pcap, #archive, #anomalies) – Links und Zurück-Taste funktionieren
+  const WORKSPACES = ['dashboard', 'flows', 'pcap', 'archive', 'anomalies'];
   const fromHash = () => {
     const key = location.hash.slice(1);
     if (WORKSPACES.includes(key)) ui.workspace = key;
@@ -31,7 +32,7 @@
     return () => clearInterval(id);
   });
 
-  // Tastenkürzel wie in Hyprland: Alt+1…4 wechselt den Workspace
+  // Tastenkürzel wie in Hyprland: Alt+1…5 wechselt den Workspace
   function onKey(event) {
     if (!event.altKey) return;
     const target = WORKSPACES[Number(event.key) - 1];
@@ -53,6 +54,8 @@
       <FlowSearch />
     {:else if ui.workspace === 'pcap'}
       <PcapAnalyzer />
+    {:else if ui.workspace === 'anomalies'}
+      <Anomalies />
     {:else}
       <ArchiveBrowser {status} />
     {/if}

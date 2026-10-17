@@ -15,7 +15,12 @@
     { key: 'flows', n: 2, label: 'flows' },
     { key: 'pcap', n: 3, label: 'pcap' },
     { key: 'archive', n: 4, label: 'archiv' },
+    { key: 'anomalies', n: 5, label: 'anomalien' },
   ];
+
+  // Auffälligkeiten der letzten 24 h als Zähler am Workspace (rot bei "hoch", gelb bei Warnungen)
+  const alerts = $derived(status?.anomalies_24h);
+  const alertCount = $derived((alerts?.high ?? 0) + (alerts?.warn ?? 0));
 
   const drops = $derived((live.collector?.dropped_flows ?? 0) + (live.collector?.parse_errors ?? 0));
 </script>
@@ -37,6 +42,12 @@
         title="Alt+{ws.n}"
       >
         <span class="text-ctp-overlay0">{ws.n}</span> {ws.label}
+        {#if ws.key === 'anomalies' && alertCount > 0}
+          <span
+            class="ml-0.5 rounded px-1 text-[10px] {alerts.high > 0 ? 'bg-ctp-red/20 text-ctp-red' : 'bg-ctp-yellow/20 text-ctp-yellow'}"
+            title="{alerts.high} hoch, {alerts.warn} warnung in den letzten 24 h">{alertCount}</span
+          >
+        {/if}
       </button>
     {/each}
   </div>

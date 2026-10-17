@@ -9,7 +9,7 @@ export const WINDOWS = [
 ];
 
 export const ui = $state({
-  workspace: 'dashboard', // dashboard | flows | pcap | archive
+  workspace: 'dashboard', // dashboard | flows | pcap | archive | anomalies
   window: '1h',
   dir: '', // Richtungsfilter für die Statistiken: '' | in | out | internal | external
   // Im Durchsatz-Chart markierter Zeitbereich {from, to} in Unix-ms – friert Chart und Verbindungstabelle ein
