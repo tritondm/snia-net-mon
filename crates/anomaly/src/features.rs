@@ -2,8 +2,10 @@
 //!
 //! Jeder Flow wird dem internen Host zugeordnet, der ihn verursacht: bei `out` und `internal` der Quelle, bei `in` dem
 //! Ziel. Gezählt werden Volumen, Flows, verschiedene Gegenstellen, Dienste und Länder, dazu die Rohdaten der festen
-//! Regeln (fehlgeschlagene TCP-Verbindungsversuche, DNS an externe Resolver).
+//! Regeln (fehlgeschlagene TCP-Verbindungsversuche, DNS an externe Resolver) und die Startzeiten ausgehender
+//! Verbindungen für die Beaconing-Erkennung.
 
+use crate::beacon::{BeaconConfig, PeerInfo};
 use geo::GeoLookup;
 use model::{Direction, FlowRecord, LocalNetworks};
 use std::collections::{HashMap, HashSet};
@@ -28,6 +30,8 @@ pub fn is_bytes(feature: usize) -> bool {
 
 /// Obergrenze je Menge, damit ein Scan über viele Adressen den Speicher nicht sprengt. Mehr braucht keine Schwelle.
 const SET_CAP: usize = 50_000;
+/// Höchstens so viele Verbindungsstarts je Fenster für die Beaconing-Erkennung.
+const BEACON_CAP: usize = 2_000_000;
 
 /// Zähler eines Hosts in einem Fenster.
 #[derive(Debug, Default)]
@@ -69,11 +73,20 @@ impl HostWindow {
     }
 }
 
-/// Welche Hosts ausgewertet werden, welche externen Resolver erlaubt sind und welche Netz-Regeln gelten.
+/// Welche Hosts ausgewertet werden, welche externen Resolver erlaubt sind, welche Netz-Regeln gelten und welche
+/// Verbindungen für Beaconing nicht beobachtet werden.
 pub struct Filters {
     pub ignore: LocalNetworks,
     pub dns_servers: LocalNetworks,
     pub policy: crate::policy::Policy,
+    pub beacon: BeaconConfig,
+}
+
+impl Default for Filters {
+    /// Keine Ausnahmen (`LocalNetworks::default()` wären die privaten Netze).
+    fn default() -> Self {
+        Self { ignore: LocalNetworks::none(), dns_servers: LocalNetworks::none(), policy: Default::default(), beacon: BeaconConfig::default() }
+    }
 }
 
 /// Verstöße gegen eine Netz-Regel durch einen Host in einem Fenster.
@@ -94,12 +107,16 @@ pub struct Window {
     pub hosts: HashMap<IpAddr, HostWindow>,
     /// (Regel-Index, interner Host) → Verstöße
     pub policy: HashMap<(usize, IpAddr), PolicyHit>,
-    countries: HashMap<IpAddr, Option<String>>,
+    /// (Host, Ziel, Port, Protokoll) → Start und Bytes jeder ausgehenden Verbindung, für die Beaconing-Erkennung
+    pub beacons: HashMap<crate::beacon::Key, Vec<(i64, u64)>>,
+    beacon_entries: usize,
+    /// Land und Netz der externen Gegenstellen (Cache für dieses Fenster)
+    pub peers: HashMap<IpAddr, PeerInfo>,
 }
 
 impl Window {
     pub fn new(start_ms: i64, partial: bool) -> Self {
-        Self { start_ms, partial, hosts: HashMap::new(), policy: HashMap::new(), countries: HashMap::new() }
+        Self { start_ms, partial, hosts: HashMap::new(), policy: HashMap::new(), beacons: HashMap::new(), beacon_entries: 0, peers: HashMap::new() }
     }
 
     pub fn add(&mut self, flow: &FlowRecord, filters: &Filters, geo: &GeoLookup) {
@@ -150,9 +167,26 @@ impl Window {
         if matches!(flow.proto, 6 | 17) && matches!(flow.dst_port, 53 | 853) && !filters.dns_servers.contains(peer) {
             *h.dns.entry(peer).or_default() += 1;
         }
-        let cc = self.countries.entry(peer).or_insert_with(|| geo.lookup(peer).cc);
-        if let Some(cc) = cc {
+        let info = self.peers.entry(peer).or_insert_with(|| {
+            let g = geo.lookup(peer);
+            PeerInfo { cc: g.cc, asn: g.asn, org: g.org }
+        });
+        if let Some(cc) = &info.cc {
             *h.countries.entry(cc.clone()).or_default() += flow.bytes;
+        }
+        // Beaconing: nur die Anfrage-Richtung (Zielport ist der Dienst), ohne Ausnahmen aus der Konfiguration
+        let b = &filters.beacon;
+        if b.enabled
+            && matches!(flow.proto, 6 | 17)
+            && flow.dst_port < flow.src_port
+            && self.beacon_entries < BEACON_CAP
+            && !b.allow_ports.contains(&flow.dst_port)
+            && !b.allow.contains(host)
+            && !b.allow.contains(peer)
+            && !info.asn.is_some_and(|asn| b.allow_asn.contains(&asn))
+        {
+            self.beacons.entry((host, peer, flow.dst_port, flow.proto)).or_default().push((flow.start_ms, flow.bytes));
+            self.beacon_entries += 1;
         }
     }
 }
@@ -185,7 +219,7 @@ mod tests {
         let filters = Filters {
             ignore: LocalNetworks::parse(&["192.168.1.99"]).unwrap(),
             dns_servers: LocalNetworks::parse(&["9.9.9.9"]).unwrap(),
-            policy: Default::default(),
+            ..Default::default()
         };
         let geo = GeoLookup::disabled();
         let mut w = Window::new(0, false);
@@ -205,5 +239,24 @@ mod tests {
         assert_eq!(h.probes.len(), 1);
         assert_eq!(h.dns.len(), 1, "nur der nicht erlaubte Resolver");
         assert!((h.upload_share() - 1220.0 / 91_220.0).abs() < 1e-9);
+        // Beaconing: ausgehende Anfragen (443, 22, 53, 53), nicht der ignorierte Host
+        assert_eq!(w.beacons.len(), 4);
+        assert!(w.beacons.contains_key(&("192.168.1.10".parse().unwrap(), "203.0.113.5".parse().unwrap(), 443, 6)));
+    }
+
+    #[test]
+    fn beacon_exceptions_are_respected() {
+        let filters = Filters {
+            beacon: BeaconConfig { allow: LocalNetworks::parse(&["198.51.100.0/24", "192.168.1.20"]).unwrap(), ..BeaconConfig::default() },
+            ..Default::default()
+        };
+        let geo = GeoLookup::disabled();
+        let mut w = Window::new(0, false);
+        w.add(&flow("192.168.1.10", "198.51.100.7", 50000, 443, 500, 0x1b, Direction::Out), &filters, &geo);
+        w.add(&flow("192.168.1.20", "203.0.113.5", 50000, 443, 500, 0x1b, Direction::Out), &filters, &geo);
+        w.add(&flow("192.168.1.10", "203.0.113.5", 50000, 123, 90, 0, Direction::Out), &filters, &geo);
+        assert!(w.beacons.is_empty(), "Ausnahme nach Ziel, Host und Port (NTP): {:?}", w.beacons.keys());
+        w.add(&flow("192.168.1.10", "203.0.113.5", 50000, 443, 500, 0x1b, Direction::Out), &filters, &geo);
+        assert_eq!(w.beacons.len(), 1);
     }
 }

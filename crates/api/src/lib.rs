@@ -67,6 +67,7 @@ pub fn router(state: AppState, frontend_dir: PathBuf) -> Router {
         .route("/stats/geo", get(geo_stats))
         .route("/anomalies", get(anomalies))
         .route("/anomalies/status", get(anomaly_status))
+        .route("/anomalies/timeline", get(anomaly_timeline))
         .route("/archives", get(archives))
         .route("/archives/{name}/open", post(open_archive))
         .route("/pcap", get(pcap::list).post(pcap::upload).layer(DefaultBodyLimit::disable()))
@@ -177,6 +178,10 @@ impl AppState {
 
 async fn anomalies(State(s): State<AppState>, Query(f): Query<anomaly::EventFilter>) -> ApiResult<Vec<anomaly::EventRow>> {
     Ok(Json(s.anomaly()?.events(f).await?))
+}
+
+async fn anomaly_timeline(State(s): State<AppState>, Query(f): Query<anomaly::EventFilter>) -> ApiResult<Vec<anomaly::Bucket>> {
+    Ok(Json(s.anomaly()?.timeline(f).await?))
 }
 
 async fn anomaly_status(State(s): State<AppState>) -> ApiResult<anomaly::Status> {

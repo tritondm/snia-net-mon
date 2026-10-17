@@ -6,12 +6,14 @@
 //! * [`forest`] – Variante 2: Isolation Forest auf denselben Merkmalen als „zweite Meinung“
 //! * feste Regeln: Portscan (SYN ohne ACK), DNS an externe Resolver, erstes Land einer Gruppe
 //! * [`policy`] – Netz-Regeln: Zonen und eine geordnete Regelliste (z. B. „schüler → verwaltung“ melden)
+//! * [`beacon`] – Beaconing: regelmäßige Verbindungen eines Hosts zum selben externen Ziel (C2-Muster)
 //! * [`store`] – `anomaly.db`: Baselines, Trainingsvektoren (ohne IP), gemeldete Auffälligkeiten
 //!
 //! Der Task hängt wie der Upload-Alarm am Flow-Strom des Collectors, sammelt ein Fenster (Standard 10 min) und wertet es
 //! danach in einem Blocking-Thread aus. Ergebnisse zeigt die Web-UI; Mails sind optional (`anomaly.mail`).
 
 pub mod baseline;
+pub mod beacon;
 mod engine;
 pub mod features;
 pub mod forest;
@@ -19,7 +21,7 @@ pub mod policy;
 pub mod store;
 
 pub use engine::{MlStatus, Status, WindowInfo};
-pub use store::{Counts, Event, EventFilter, EventRow, Kind, Severity};
+pub use store::{Bucket, Counts, Event, EventFilter, EventRow, Kind, Severity};
 
 use alert::Mailer;
 use engine::Engine;
@@ -101,6 +103,8 @@ pub struct AnomalyConfig {
     pub max_mails_per_hour: u32,
     /// Netz-Regeln (leer = keine)
     pub policy: policy::Policy,
+    /// Beaconing-Erkennung samt Ausnahmen
+    pub beacon: beacon::BeaconConfig,
 }
 
 impl Default for AnomalyConfig {
@@ -133,6 +137,7 @@ impl Default for AnomalyConfig {
             mail_min_severity: Severity::High,
             max_mails_per_hour: 20,
             policy: policy::Policy::default(),
+            beacon: beacon::BeaconConfig::default(),
         }
     }
 }
@@ -151,6 +156,11 @@ impl Anomaly {
     pub async fn events(&self, filter: EventFilter) -> Result<Vec<EventRow>, Error> {
         let engine = self.engine.clone();
         Ok(tokio::task::spawn_blocking(move || Self::lock(&engine).events(&filter)).await??)
+    }
+
+    pub async fn timeline(&self, filter: EventFilter) -> Result<Vec<Bucket>, Error> {
+        let engine = self.engine.clone();
+        Ok(tokio::task::spawn_blocking(move || Self::lock(&engine).timeline(&filter, now_ms())).await??)
     }
 
     pub async fn status(&self) -> Result<Status, Error> {
@@ -174,6 +184,7 @@ pub fn spawn(
         timezone = %engine.timezone_name(),
         ml = config.ml,
         policy_rules = config.policy.rules.len(),
+        beacon = config.beacon.enabled,
         mail = config.mail && mailer.is_some(),
         "Anomalie-Erkennung aktiv"
     );
@@ -184,7 +195,12 @@ pub fn spawn(
     let engine = handle.engine.clone();
     let task = tokio::spawn(async move {
         let window_ms = config.window.as_millis() as i64;
-        let filters = Filters { ignore: config.ignore.clone(), dns_servers: config.dns_servers.clone(), policy: config.policy.clone() };
+        let filters = Filters {
+            ignore: config.ignore.clone(),
+            dns_servers: config.dns_servers.clone(),
+            policy: config.policy.clone(),
+            beacon: config.beacon.clone(),
+        };
         let new_window = |now: i64| {
             let start = now - now.rem_euclid(window_ms);
             Window::new(start, now - start > window_ms / 10)
@@ -228,6 +244,7 @@ fn kind_label(kind: Kind) -> &'static str {
         Kind::Dns => "externes dns",
         Kind::Country => "neues land",
         Kind::Policy => "netz-regel",
+        Kind::Beacon => "beaconing",
     }
 }
 
@@ -238,7 +255,7 @@ fn notify(events: Vec<Event>, config: &AnomalyConfig, mailer: Option<&Mailer>, s
         } else {
             tracing::info!(host = %e.host, kind = kind_label(e.kind), "Auffälligkeit: {}", e.title);
         }
-        let Some(mailer) = mailer.filter(|_| config.mail && e.severity >= config.mail_min_severity) else { continue };
+        let Some(mailer) = mailer.filter(|_| wants_mail(&e, config)) else { continue };
         let now = now_ms();
         while sent.front().is_some_and(|&t| now - t > 3_600_000) {
             sent.pop_front();
@@ -256,6 +273,11 @@ fn notify(events: Vec<Event>, config: &AnomalyConfig, mailer: Option<&Mailer>, s
             }
         });
     }
+}
+
+/// Soll diese Auffälligkeit per Mail gemeldet werden? Beaconing ist nur ein Hinweis für die Web-UI und geht nie raus.
+fn wants_mail(e: &Event, config: &AnomalyConfig) -> bool {
+    config.mail && e.kind != Kind::Beacon && e.severity >= config.mail_min_severity
 }
 
 /// Betreff und Text der Mail zu einer Auffälligkeit.
@@ -283,4 +305,28 @@ pub fn render(e: &Event) -> (String, String) {
         detail = serde_json::to_string_pretty(&e.detail).unwrap_or_default(),
     );
     (subject, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn beaconing_never_goes_out_by_mail() {
+        let config = AnomalyConfig { mail: true, mail_min_severity: Severity::Info, ..AnomalyConfig::default() };
+        let event = |kind| Event {
+            ts: 0,
+            host: "10.0.1.5".into(),
+            group: "10.0.1.0/24".into(),
+            kind,
+            tag: String::new(),
+            severity: Severity::High,
+            score: 1.0,
+            title: String::new(),
+            detail: serde_json::Value::Null,
+        };
+        assert!(wants_mail(&event(Kind::Scan), &config));
+        assert!(!wants_mail(&event(Kind::Beacon), &config));
+        assert!(!wants_mail(&event(Kind::Scan), &AnomalyConfig { mail: false, ..config.clone() }));
+    }
 }

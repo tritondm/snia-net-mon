@@ -2,9 +2,10 @@
 
 use crate::AnomalyConfig;
 use crate::baseline::{Baselines, SlotKind};
+use crate::beacon::{self, Finding, Tracker};
 use crate::features::{FEATURES, HostWindow, NAMES, PolicyHit, Window, is_bytes};
 use crate::forest::{self, Forest, Rng, SHARE, TIME, Vector};
-use crate::store::{Counts, Event, EventFilter, EventRow, Kind, Severity, Store};
+use crate::store::{Bucket, Counts, Event, EventFilter, EventRow, Kind, Severity, Store};
 use jiff::tz::TimeZone;
 use model::{cidr_range, ip_from_bytes, ip_to_bytes};
 use serde::Serialize;
@@ -136,6 +137,9 @@ pub struct Status {
     /// Anzahl Netz-Regeln und Zonen
     pub policy_rules: usize,
     pub policy_zones: usize,
+    pub beacon: bool,
+    /// beobachtete Verbindungspaare (Host, Ziel, Port)
+    pub beacon_pairs: usize,
 }
 
 pub(crate) struct Engine {
@@ -152,6 +156,7 @@ pub(crate) struct Engine {
     last_prune_ms: i64,
     last_train_attempt_ms: i64,
     rng: Rng,
+    beacons: Tracker,
 }
 
 impl Engine {
@@ -185,6 +190,7 @@ impl Engine {
             last_prune_ms: 0,
             last_train_attempt_ms: i64::MIN / 2,
             rng: Rng::new(now as u64 ^ 0x5eed_a90a),
+            beacons: Tracker::default(),
         })
     }
 
@@ -261,6 +267,16 @@ impl Engine {
                         });
                     }
                 }
+            }
+        }
+
+        if self.cfg.beacon.enabled {
+            let peers: HashMap<IpAddr, beacon::PeerInfo> =
+                window.beacons.keys().filter_map(|k| window.peers.get(&k.1).map(|i| (k.1, i.clone()))).collect();
+            self.beacons.merge(window.beacons, peers, now);
+            for f in self.beacons.analyze(&self.cfg.beacon) {
+                let info = self.beacons.info(&f.key.1).cloned().unwrap_or_default();
+                found.push(beacon_event(end, &self.groups.of(f.key.0), &f, &info));
             }
         }
 
@@ -349,6 +365,10 @@ impl Engine {
         self.store.events(filter)
     }
 
+    pub fn timeline(&self, filter: &EventFilter, now: i64) -> rusqlite::Result<Vec<Bucket>> {
+        self.store.timeline(filter, now)
+    }
+
     pub fn status(&self, now: i64) -> rusqlite::Result<Status> {
         Ok(Status {
             window_minutes: self.cfg.window.as_secs() / 60,
@@ -376,6 +396,8 @@ impl Engine {
             mail: self.cfg.mail,
             policy_rules: self.cfg.policy.rules.len(),
             policy_zones: self.cfg.policy.zones,
+            beacon: self.cfg.beacon.enabled,
+            beacon_pairs: self.beacons.pairs(),
         })
     }
 }
@@ -554,6 +576,55 @@ fn policy_event(ts: i64, host: &str, group: &str, rule: &crate::policy::Rule, hi
     }
 }
 
+fn beacon_event(ts: i64, group: &str, f: &Finding, info: &beacon::PeerInfo) -> Event {
+    let (host, peer, port, proto) = f.key;
+    let proto_name = if proto == 17 { "udp" } else { "tcp" };
+    let minutes = (f.last_ms - f.first_ms) / 60_000;
+    let span = if minutes >= 120 { format!("{} h", minutes / 60) } else { format!("{minutes} min") };
+    let place = match (&info.cc, &info.org) {
+        (Some(cc), Some(org)) => format!(" ({cc}, {org})"),
+        (Some(cc), None) => format!(" ({cc})"),
+        (None, Some(org)) => format!(" ({org})"),
+        (None, None) => String::new(),
+    };
+    Event {
+        ts,
+        host: host.to_string(),
+        group: group.into(),
+        kind: Kind::Beacon,
+        tag: format!("{peer}:{port}/{proto_name}"),
+        // nur ein Hinweis zum Nachsehen: regelmäßige Verbindungen haben oft harmlose Gründe (geht nie per Mail raus)
+        severity: Severity::Info,
+        score: f.connections as f64,
+        title: format!(
+            "beaconing zu {peer}:{port}{place}: {} verbindungen, alle {} ± {:.0} %, je ~{}, seit {span}",
+            f.connections,
+            fmt_interval(f.interval_s),
+            f.jitter * 100.0,
+            fmt_bytes(f.median_bytes as f64)
+        ),
+        detail: json!({
+            "peer": peer.to_string(),
+            "port": port,
+            "proto": proto_name,
+            "cc": info.cc,
+            "asn": info.asn,
+            "org": info.org,
+            "connections": f.connections,
+            "interval_s": round2(f.interval_s),
+            "jitter": round2(f.jitter),
+            "median_bytes": f.median_bytes,
+            "first_ms": f.first_ms,
+            "last_ms": f.last_ms,
+            "hosts_for_peer": f.hosts_for_peer,
+        }),
+    }
+}
+
+fn fmt_interval(secs: f64) -> String {
+    if secs >= 90.0 { format!("{:.1} min", secs / 60.0) } else { format!("{secs:.0} s") }
+}
+
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
@@ -581,7 +652,7 @@ pub(crate) fn fmt_bytes(bytes: f64) -> String {
 mod tests {
     use super::*;
     use crate::features::Filters;
-    use model::{Direction, FlowRecord, LocalNetworks};
+    use model::{Direction, FlowRecord};
 
     const MIB: u64 = 1024 * 1024;
 
@@ -611,7 +682,7 @@ mod tests {
     }
 
     fn filters() -> Filters {
-        Filters { ignore: LocalNetworks::none(), dns_servers: LocalNetworks::none(), policy: Default::default() }
+        Filters::default()
     }
 
     /// Normaler Verkehr: 30 Clients in 10.0.1.0/24, jeder ein paar MiB zu wenigen Servern.
@@ -727,7 +798,7 @@ mod tests {
         let cfg = AnomalyConfig { learning_days: 7, policy: policy.clone(), ..config("policy") };
         let path = cfg.db_path.clone();
         let mut engine = Engine::open(cfg, 0).unwrap();
-        let filters = Filters { ignore: LocalNetworks::none(), dns_servers: LocalNetworks::none(), policy };
+        let filters = Filters { policy, ..Filters::default() };
         let geo = geo::GeoLookup::disabled();
         let window = |start: i64| {
             let mut w = Window::new(start, false);
@@ -751,6 +822,38 @@ mod tests {
         let rows = engine.events(&EventFilter { kind: Some("policy".into()), ..Default::default() }).unwrap();
         assert_eq!(rows.iter().map(|r| r.count).collect::<Vec<_>>(), vec![2, 2]);
         assert_eq!(engine.status(1_200_000).unwrap().policy_rules, 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn regular_connections_to_one_target_are_reported_as_beaconing() {
+        let cfg = AnomalyConfig { learning_days: 7, ..config("beacon") };
+        let path = cfg.db_path.clone();
+        let mut engine = Engine::open(cfg, 0).unwrap();
+        let geo = geo::GeoLookup::disabled();
+        let window = 600_000;
+        let mut beacons = Vec::new();
+        // 3 Stunden lang alle 60 s eine kleine Verbindung, dazu gewöhnlicher Verkehr
+        for i in 0..18 {
+            let start = i * window;
+            let mut w = normal_window(start, i as u64);
+            for k in 0..10 {
+                let t = start + k * 60_000 + (k * 7_919) % 3_000;
+                let f = FlowRecord { start_ms: t, ts_ms: t, src_port: 40_000 + k as u16, ..flow("10.0.1.20", "198.51.100.66", 443, 420, 0x1b, Direction::Out) };
+                w.add(&f, &Filters::default(), &geo);
+            }
+            beacons.extend(engine.finish_window(w, start + window).unwrap().into_iter().filter(|e| e.kind == Kind::Beacon));
+        }
+        assert_eq!(beacons.len(), 1, "einmal angelegt, danach verlängert: {beacons:?}");
+        let b = &beacons[0];
+        assert_eq!((b.host.as_str(), b.severity, b.tag.as_str()), ("10.0.1.20", Severity::Info, "198.51.100.66:443/tcp"));
+        assert!(b.title.starts_with("beaconing zu 198.51.100.66:443: "), "{}", b.title);
+        assert!((b.detail["interval_s"].as_f64().unwrap() - 60.0).abs() < 3.0, "{}", b.detail);
+        // die normalen Clients sprechen mit wenigen gemeinsamen Servern in Bündeln – keine Meldung
+        let rows = engine.events(&EventFilter { kind: Some("beacon".into()), ..Default::default() }).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].count > 1);
+        assert!(engine.status(18 * window).unwrap().beacon_pairs > 0);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

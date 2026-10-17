@@ -22,10 +22,12 @@ pub enum Kind {
     Country,
     /// Verstoß gegen eine Netz-Regel
     Policy,
+    /// regelmäßige Verbindungen zu einem externen Ziel
+    Beacon,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [Kind::Stat, Kind::Ml, Kind::Scan, Kind::Dns, Kind::Country, Kind::Policy];
+    pub const ALL: [Kind; 7] = [Kind::Stat, Kind::Ml, Kind::Scan, Kind::Dns, Kind::Country, Kind::Policy, Kind::Beacon];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -35,6 +37,7 @@ impl Kind {
             Kind::Dns => "dns",
             Kind::Country => "country",
             Kind::Policy => "policy",
+            Kind::Beacon => "beacon",
         }
     }
 
@@ -116,7 +119,21 @@ pub struct EventFilter {
     /// Mindest-Schwere: `info`, `warn`, `high`
     pub severity: Option<String>,
     pub limit: Option<u32>,
+    /// Nur Zeitleiste: Länge eines Abschnitts in ms
+    pub bucket: Option<i64>,
 }
+
+/// Ein Abschnitt der Zeitleiste: Auffälligkeiten, die in diesem Zeitraum aktiv waren, je Schwere.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct Bucket {
+    pub ts: i64,
+    pub info: u64,
+    pub warn: u64,
+    pub high: u64,
+}
+
+/// Höchstens so viele Abschnitte je Zeitleiste.
+const MAX_BUCKETS: i64 = 500;
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct Counts {
@@ -314,6 +331,38 @@ impl Store {
         rows.collect()
     }
 
+    /// Zeitleiste: je Abschnitt die Auffälligkeiten, die darin aktiv waren (erstes bis letztes Fenster überlappt den
+    /// Abschnitt), nach Schwere. Es gelten dieselben Filter wie für die Liste, außer `limit`.
+    pub fn timeline(&self, f: &EventFilter, now: i64) -> rusqlite::Result<Vec<Bucket>> {
+        let to = f.to.unwrap_or(now);
+        let from = f.from.unwrap_or(to - 86_400_000).min(to);
+        let bucket = f.bucket.unwrap_or(3_600_000).max(60_000).max((to - from) / MAX_BUCKETS + 1);
+        // Die Abschnitte beginnen bei `from` – die Web-UI richtet es auf volle Stunden bzw. Tage in Ortszeit aus
+        let first = from;
+        let mut buckets: Vec<Bucket> = (0..).map(|i| first + i * bucket).take_while(|ts| *ts < to).map(|ts| Bucket { ts, ..Bucket::default() }).collect();
+        let kind = f.kind.as_deref().filter(|k| !k.is_empty()).map(|k| Kind::parse(k).map(Kind::name).unwrap_or("?"));
+        let severity = f.severity.as_deref().and_then(Severity::parse).unwrap_or(Severity::Info) as i64;
+        let host = f.host.as_deref().map(str::trim).filter(|h| !h.is_empty());
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT ts, last_ts, severity FROM events
+             WHERE last_ts >= ?1 AND ts <= ?2 AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR host = ?4) AND severity >= ?5",
+        )?;
+        let rows = stmt.query_map(params![first, to, kind, host, severity], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?;
+        for row in rows {
+            let (ts, last_ts, sev) = row?;
+            let lo = ((ts.max(first) - first) / bucket) as usize;
+            let hi = ((last_ts.min(to - 1).max(first) - first) / bucket) as usize;
+            for b in buckets.iter_mut().take(hi + 1).skip(lo) {
+                match Severity::from_i64(sev) {
+                    Severity::Info => b.info += 1,
+                    Severity::Warn => b.warn += 1,
+                    Severity::High => b.high += 1,
+                }
+            }
+        }
+        Ok(buckets)
+    }
+
     /// Anzahl Auffälligkeiten je Schwere, die seit `since` noch aktiv waren.
     pub fn counts(&self, since: i64) -> rusqlite::Result<Counts> {
         let mut stmt = self.conn.prepare_cached("SELECT severity, count(*) FROM events WHERE last_ts >= ?1 GROUP BY severity")?;
@@ -396,6 +445,12 @@ mod tests {
         assert!(store.events(&EventFilter { kind: Some("unsinn".into()), ..Default::default() }).unwrap().is_empty());
         let c = store.counts(0).unwrap();
         assert_eq!((c.info, c.warn, c.high), (1, 0, 1));
+
+        // Zeitleiste in 10-Minuten-Abschnitten: stat läuft über zwei Abschnitte, scan liegt im zweiten
+        let tl = store.timeline(&EventFilter { from: Some(0), to: Some(1_800_000), bucket: Some(600_000), ..Default::default() }, 0).unwrap();
+        assert_eq!(tl.iter().map(|b| (b.ts, b.info, b.high)).collect::<Vec<_>>(), vec![(0, 0, 0), (600_000, 0, 1), (1_200_000, 1, 1)]);
+        let tl = store.timeline(&EventFilter { from: Some(0), to: Some(1_800_000), bucket: Some(600_000), kind: Some("scan".into()), ..Default::default() }, 0).unwrap();
+        assert_eq!(tl.iter().map(|b| b.info).sum::<u64>(), 1);
 
         assert_eq!(store.prune(2000, 1_000_000).unwrap(), (2, 0));
         assert_eq!(store.prune(2000, 1_300_000).unwrap(), (0, 2));

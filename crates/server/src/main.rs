@@ -175,6 +175,15 @@ struct AnomalySection {
     /// Netz-Regeln: benannte Zonen und geordnete Regeln (`[[anomaly.zones]]`, `[[anomaly.rules]]`)
     zones: Vec<anomaly::policy::ZoneConfig>,
     rules: Vec<anomaly::policy::RuleConfig>,
+    beacon: bool,
+    beacon_min_connections: usize,
+    beacon_min_minutes: u64,
+    beacon_max_jitter: f64,
+    beacon_max_hosts: usize,
+    /// Ausnahmen: interne Hosts oder externe Ziele (IP oder CIDR)
+    beacon_allow: Vec<String>,
+    beacon_allow_asn: Vec<u32>,
+    beacon_allow_ports: Vec<u16>,
 }
 
 impl Default for AnomalySection {
@@ -213,6 +222,14 @@ impl Default for AnomalySection {
             mail_min_severity: d.mail_min_severity.name().into(),
             zones: Vec::new(),
             rules: Vec::new(),
+            beacon: d.beacon.enabled,
+            beacon_min_connections: d.beacon.min_connections,
+            beacon_min_minutes: d.beacon.min_minutes,
+            beacon_max_jitter: d.beacon.max_jitter,
+            beacon_max_hosts: d.beacon.max_hosts,
+            beacon_allow: Vec::new(),
+            beacon_allow_asn: Vec::new(),
+            beacon_allow_ports: d.beacon.allow_ports.iter().copied().collect(),
         }
     }
 }
@@ -256,6 +273,16 @@ impl AnomalySection {
                 .ok_or_else(|| anyhow::anyhow!("anomaly.mail_min_severity: erlaubt sind info, warn, high – nicht {:?}", self.mail_min_severity))?,
             max_mails_per_hour,
             policy: anomaly::policy::Policy::new(&self.zones, &self.rules).map_err(|e| anyhow::anyhow!("anomaly.{e}"))?,
+            beacon: anomaly::beacon::BeaconConfig {
+                enabled: self.beacon,
+                min_connections: self.beacon_min_connections.clamp(5, 500),
+                min_minutes: self.beacon_min_minutes.clamp(10, 11 * 60),
+                max_jitter: self.beacon_max_jitter.clamp(0.01, 1.0),
+                max_hosts: self.beacon_max_hosts.max(1),
+                allow: nets("beacon_allow", &self.beacon_allow)?,
+                allow_asn: self.beacon_allow_asn.iter().copied().collect(),
+                allow_ports: self.beacon_allow_ports.iter().copied().collect(),
+            },
         })
     }
 }
