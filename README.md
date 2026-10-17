@@ -4,7 +4,9 @@ Netzwerkmonitor für eine **pfSense-Firewall**. Er sammelt Verbindungsdaten per 
 **GeoIP (Land, ASN)** für jede externe Gegenstelle – und macht sie durchsuchbar. Dazu kommt eine **PCAP-Analyse** für
 Mitschnitte (pcap/pcapng). Die Live-Daten umfassen die letzten **48 Stunden**, gespeichert als eine SQLite-Datei pro
 Stunde. Ältere Stunden wandern in eine **Historie**, die ab 50 GB in ein **zstd-Archiv** rotiert wird. Archive bleiben
-**3 Monate** und lassen sich in der Web-UI wieder ansehen. Große Uploads (> 1 GiB in einer Verbindung) melden sich **per Mail bei den Admins**.
+**3 Monate** und lassen sich in der Web-UI wieder ansehen. Große Uploads (> 1 GiB in einer Verbindung) melden sich **per Mail bei den Admins**. Eine **automatische
+Anomalie-Erkennung** vergleicht jeden internen Host mit dem Normalverhalten seines Netzes und, bei festen Adressen, mit
+seinem eigenen. Dazu kommen feste Regeln und ein Isolation Forest als zweite Meinung.
 
 - **Backend:** Rust (Tokio, Axum), SQLite im WAL-Modus, eine Datei pro Stunde
 - **Frontend:** Svelte 5 + Tailwind, Catppuccin-Mocha-Theme im Hyprland-Look (Frosted Glass, Verlaufskanten, Monospace)
@@ -24,8 +26,9 @@ Stunde. Ältere Stunden wandern in eine **Historie**, die ab 50 GB in ein **zstd
 | **Aufbewahrung** | live 48 h (höchstens 72 h) → Historie bis 50 GB → zstd-Archiv, gelöscht 90 Tage nach dem jüngsten Flow; siehe [Aufbewahrung](#aufbewahrung-live--historie--archiv). PCAP-Analysen folgen dem Live-Fenster, die hochgeladene Datei selbst wird direkt nach der Analyse gelöscht |
 | **Ausgenommene Netze** | `network.exclude_networks`: Verkehr von oder zu diesen Netzen wird beim Empfang verworfen – nicht gespeichert, nicht angezeigt, nicht gezählt |
 | **Upload-Alarm** | lädt eine Verbindung mehr als 1 GiB nach extern hoch, geht eine Mail an die Admins (Quelle, Ziel mit Land/ASN, Dienst, Menge, Dauer, Rate) |
+| **Anomalien** (`#anomalies`) | Statistik gegen eine Baseline je Netzgruppe und Host, Portscan, DNS an externe Resolver, erstes Land einer Gruppe, Isolation Forest als zweite Meinung. Status der Lernphase und des Modells, Verlauf der Auffälligkeiten (30 Tage) mit Filter, Klick auf den Host öffnet die Flow-Suche. Siehe [Anomalie-Erkennung](#anomalie-erkennung) |
 
-Tastatur wie in Hyprland: **Alt+1 … Alt+4** wechselt den Workspace. Der Fokus folgt der Maus: Das Fenster unter dem Zeiger
+Tastatur wie in Hyprland: **Alt+1 … Alt+5** wechselt den Workspace. Der Fokus folgt der Maus: Das Fenster unter dem Zeiger
 bekommt die aktive Verlaufskante.
 
 ## Schnellstart (Demo ohne pfSense)
@@ -112,6 +115,54 @@ Upload-Alarm. Typisch: ein Backup-Server, dessen nächtliche Uploads keinen Alar
 Zähler `collector.excluded_flows` unter `/api/status` zeigt, wie viel verworfen wurde. Bereits gespeicherte Flows bleiben
 unverändert.
 
+## Anomalie-Erkennung
+
+Der Collector reicht jeden Flow auch an die Anomalie-Erkennung weiter. Sie ordnet ihn dem internen Host zu, der ihn
+verursacht (bei Upload und internem Verkehr die Quelle, bei Download das Ziel), und sammelt je Host und Fenster
+(Standard 10 min) sieben Merkmale: **Upload, Download, Flows, verschiedene externe Ziele, verschiedene interne Ziele,
+verschiedene Dienste (Ports), verschiedene Länder**. Am Ende des Fensters wird ausgewertet:
+
+| Verfahren | Was es meldet | Schwere |
+|---|---|---|
+| **Statistik** (Baseline) | Ein Merkmal liegt mindestens `z_threshold` Standardabweichungen über dem Typischen **und** erreicht den Mindestwert (z. B. 100 MB Upload pro Fenster). Text z. B. „upload 3.0 GiB statt typisch 38 MiB (80×)“ | warnung, hoch bei Zustimmung des Isolation Forest oder doppelter Schwelle |
+| **Isolation Forest** (ML) | Gibt jedem Host-Fenster einen Score. Bei statistischen Treffern steht er als zweite Meinung dabei („ml 0.81 ✓ stimmt zu“). Allein meldet er ungewöhnliche *Kombinationen*, bei denen jeder Einzelwert normal ist, samt den stärksten Abweichungen | info |
+| **Portscan** | mindestens `scan_threshold` fehlgeschlagene TCP-Verbindungsversuche (SYN ohne ACK) zu verschiedenen Ziel/Port-Paaren, auch im LAN | hoch |
+| **Externes DNS** | DNS (53/853) an einen Resolver außerhalb, der nicht in `dns_servers` steht | warnung |
+| **Neues Land** | erste Verbindung einer Netzgruppe in ein Land, das sie nie zuvor kontaktiert hat | info |
+
+**Baseline:** gleitender Mittelwert und gleitende Varianz (EWMA) auf logarithmierten Werten. Ausreißer fließen nur
+gedämpft ein, damit ein Angreifer die Baseline nicht langsam „hochziehen“ kann. Es gibt zwei Ebenen:
+
+- **Netzgruppe:** Standard ist das Subnetz (/24 bzw. /64), eigene Gruppen über `groups`. Verglichen wird mit dem
+  *typischen Host* der Gruppe zur gleichen Zeit: Wochentag × Stunde (168 Slots), solange das noch nicht eingelernt ist
+  nur die Stunde (24 Slots). Das funktioniert auch mit DHCP, wo dieselbe IP morgen ein anderes Gerät ist.
+- **Host:** In Netzen mit festen Adressen bekommt jeder Host zusätzlich ein eigenes Profil (Werktag/Wochenende ×
+  Stunde). Sobald es eingelernt ist (gut eine Woche), hat es Vorrang. Ein Drucker oder Server, der plötzlich ins
+  Internet hochlädt, fällt so gegen sein eigenes Verhalten auf und nicht erst gegen den Durchschnitt des Netzes. Netze
+  mit wechselnden Adressen gehören in `dynamic_networks`, dort gibt es nur das Gruppenprofil.
+
+Beispiel für eine Schule mit einem Schülernetz per DHCP und sonst festen Adressen:
+
+```toml
+[anomaly]
+dynamic_networks = ["10.20.0.0/22"]          # Schüler-WLAN
+groups = ["10.0.10.0/28"]                    # Server-VLAN als eigene Gruppe (sonst /24)
+ignore = ["10.0.10.5"]                       # Backup-Server, große Uploads sind normal
+dns_servers = []                             # externe Resolver, die erlaubt sind
+```
+
+**Lernphase:** In den ersten `learning_days` (Standard 7) nach dem ersten Start wird nur gelernt. Portscan und externes
+DNS melden sofort. Der Isolation Forest trainiert nach der Lernphase und danach täglich mit den Merkmalsvektoren der
+letzten 14 Tage. Er meldet ab `ml_threshold`, mindestens aber ab dem 99,9-%-Quantil der eigenen Trainingsdaten. Die
+Score-Verteilung steht in der Web-UI und hilft beim Einstellen.
+
+**Zusammenfassen:** Tritt dieselbe Art beim selben Host innerhalb einer Stunde erneut auf, wird die bestehende Zeile
+verlängert („3×“) statt eine neue anzulegen. Die stärkste Messung bestimmt den Text.
+
+**Mails** sind zunächst aus. Mit `mail = true` gehen neue Auffälligkeiten ab `mail_min_severity` (Standard `high`) an die
+Admins aus `[email]`, begrenzt durch `alerts.max_mails_per_hour`. Erst einschalten, wenn die Schwellen zum eigenen Netz
+passen.
+
 ## Konfiguration
 
 Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind dort kommentiert. Die wichtigsten:
@@ -135,7 +186,20 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `history.compression_level` | `19` | zstd-Stufe 1–22 |
 | `alerts.upload_threshold_mb` | `1024` | Upload-Alarm ab dieser Menge je Verbindung, `0` = aus |
 | `alerts.session_idle_secs` | `600` | ohne neue Flows so lange gilt eine Verbindung als beendet |
-| `alerts.max_mails_per_hour` | `20` | Obergrenze gegen Mail-Fluten |
+| `alerts.max_mails_per_hour` | `20` | Obergrenze gegen Mail-Fluten (gilt auch für Anomalie-Mails) |
+| `anomaly.enabled` | `true` | Anomalie-Erkennung, Daten in `anomaly.db` (`data/anomaly.db`) |
+| `anomaly.window_minutes` / `learning_days` | `10` / `7` | Fensterlänge, Lernphase nach dem ersten Start |
+| `anomaly.z_threshold` | `4.0` | Schwelle der Statistik (Log-Skala, 4 ≈ Faktor 7+), dazu Mindestwerte `min_upload_mb` (100), `min_download_mb` (1024), `min_flows`, `min_peers`, `min_internal_peers`, `min_ports`, `min_countries` |
+| `anomaly.groups` / `group_prefix_v4` / `group_prefix_v6` | leer / `24` / `64` | eigene Netzgruppen, sonst Subnetz dieser Länge |
+| `anomaly.host_profiles` / `dynamic_networks` | `true` / leer | Profil je Host, außer in Netzen mit wechselnden Adressen (DHCP) |
+| `anomaly.ignore` | leer | Hosts, die nicht ausgewertet werden |
+| `anomaly.scan_threshold` | `100` | Portscan ab so vielen fehlgeschlagenen Versuchen je Fenster, `0` = aus |
+| `anomaly.dns_rule` / `dns_servers` | `true` / leer | DNS an externe Resolver melden / erlaubte externe Resolver |
+| `anomaly.new_country` | `true` | erstes Land einer Netzgruppe melden |
+| `anomaly.ml` / `ml_threshold` / `ml_training_days` | `true` / `0.65` / `14` | Isolation Forest |
+| `anomaly.event_retention_days` | `30` | Aufbewahrung der Auffälligkeiten |
+| `anomaly.timezone` | leer | Zeitzone für Wochentag/Stunde, leer = System |
+| `anomaly.mail` / `mail_min_severity` | `false` / `high` | Mails an die Admins |
 | `email.smtp_host` / `smtp_port` / `security` | leer / `587` / `starttls` | SMTP-Server; `security` = `starttls`, `tls` (465) oder `none` (nur Relay im LAN). Leerer Host = kein Mailversand |
 | `email.username` / `email.password` | leer | SMTP-Anmeldung; Passwort alternativ per `SNIA_SMTP_PASSWORD` |
 | `email.from` / `email.admins` | – | Absender und Empfänger der Alarm-Mails |
@@ -154,7 +218,8 @@ Mailversand prüfen: `snia-net-mon --test-mail [config.toml]` schickt eine Test-
 pfSense (softflowd) ──UDP 2055──▶ collector ──Batches──┬──▶ db: Writer-Thread ──▶ live/ (index.db + Datei je Stunde, 48 h)
                                   (n Worker,            │        Retention-Task ──▶ history/ ──50 GB──▶ archive/flows_<von>_<bis>/
                                    SO_REUSEPORT,        ├──▶ api::LiveHub ──1×/s──▶ WebSocket ──▶ Browser
-                                   exclude_networks)    └──▶ alert: Upload je Verbindung > 1 GiB ──SMTP──▶ Admins
+                                   exclude_networks)    ├──▶ alert: Upload je Verbindung > 1 GiB ──SMTP──▶ Admins
+                                                        └──▶ anomaly: Fenster je Host ──▶ Baseline, Regeln, Isolation Forest ──▶ anomaly.db
 Browser ──REST──▶ api (Axum) ──▶ db (live, Historie oder geöffnetes Archiv) ──▶ geo (Land/ASN je IP, beim Ausliefern)
 Browser ──PCAP-Upload──▶ api ──▶ pcap (Analyse im Blocking-Thread) ──▶ db (Ergebnis als JSON, 48 h)
 ```
@@ -192,6 +257,13 @@ Snia-Net-Mon/
 │   ├── alert/
 │   │   ├── upload.rs          Upload-Summen je Verbindung, Alarm einmal pro Verbindung, Mail-Text
 │   │   └── mail.rs            SMTP-Versand (lettre, rustls)
+│   ├── anomaly/
+│   │   ├── features.rs        Merkmale je internem Host und Fenster, Rohdaten der Regeln
+│   │   ├── baseline.rs        EWMA-Baseline je Netzgruppe (Wochen-/Tages-Slots) und je Host
+│   │   ├── forest.rs          Isolation Forest (eigene Implementierung), Score-Quantile, Median/MAD für Erklärungen
+│   │   ├── engine.rs          Auswertung eines Fensters, Regeln, Zusammenfassen, tägliches Training
+│   │   ├── store.rs           anomaly.db: Baselines, Länder, Trainingsvektoren (ohne IP), Auffälligkeiten
+│   │   └── lib.rs             Konfiguration, Task am Flow-Strom, optionale Mails
 │   ├── server/                Binary snia-net-mon: Konfiguration + Verdrahtung, --test-mail, geordnetes Herunterfahren
 │   └── flowgen/               Binary flowgen: Demo-/Lastgenerator
 └── frontend/
@@ -373,6 +445,9 @@ Daten sind deshalb **personenbezogen** im Sinne der DSGVO. Das gilt besonders an
 | **Archiv** | gepackte Historie | `history.archive_dir` | 90 Tage nach dem jüngsten Flow |
 | **PCAP-Analysen** | Ergebnis einer hochgeladenen Capture-Datei: IPs, **Domains** (DNS, TLS-SNI), **HTTP-Hosts und -URLs**, erkannte Anwendungen | `index.db` | 48 h, nicht archiviert. Die Capture-Datei selbst wird direkt nach der Analyse gelöscht |
 | **Upload-Alarm** | Quelle, Ziel, Dienst, Menge und Zeitraum der Verbindung | Mail an `email.admins`, Log | je nach Mailpostfach bzw. Log-Rotation des Systems |
+| **Anomalie-Baselines** | Mittelwert und Streuung der Merkmale je Netzgruppe und – bei `host_profiles` – **je Host-IP** und Stunde | `anomaly.db` | unbegrenzt, wird laufend überschrieben |
+| **Trainingsvektoren** | Merkmale je Host-Fenster (Volumen, Anzahl Ziele, Ports, Länder, Uhrzeit), **ohne IP-Adresse** | `anomaly.db` | 14 Tage (`ml_training_days`) |
+| **Auffälligkeiten** | Host-IP, Netzgruppe, Zeitraum, Befund mit Werten; bei DNS die Resolver, bei Portscans ein Auszug der Ziele | `anomaly.db`, Log, optional Mail | 30 Tage (`event_retention_days`) |
 
 Land und ASN einer IP werden lokal aus den GeoLite2-Dateien nachgeschlagen, nicht gespeichert. Snia-Net-Mon schickt
 keine Verbindungsdaten nach außen. Die einzige ausgehende Verbindung ist der optionale Download der GeoIP-Datenbanken bei
@@ -408,6 +483,11 @@ tatsächliche Aufbewahrung kann so deutlich über 90 Tagen liegen.
 - **Upload-Alarm prüfen:** Die Mails enthalten IP-Adressen und landen in Postfächern außerhalb von Snia-Net-Mon. Nur
   einschalten, wenn er gebraucht wird (`alerts.upload_threshold_mb = 0` schaltet ihn ab), und die Empfängerliste klein
   halten.
+- **Anomalie-Erkennung bewusst einsetzen:** Host-Profile beschreiben das Verhalten einzelner Geräte. In Netzen von
+  Lehrkräften oder Verwaltung ist das eine Form der Verhaltensauswertung, über die die Personalvertretung zu informieren
+  ist. Solche Netze in `dynamic_networks` aufnehmen (nur Gruppenprofil) oder per `ignore` bzw.
+  `network.exclude_networks` ganz ausnehmen. `host_profiles = false` schaltet Profile je Host komplett ab,
+  `enabled = false` die ganze Erkennung.
 
 ### Organisatorisches
 
@@ -427,7 +507,7 @@ Snia-Net-Mon ist für den Netzbetrieb gedacht, nicht zur Überwachung einzelner 
 
 | Methode | Pfad | Beschreibung |
 |---|---|---|
-| GET | `/api/status` | Collector-Zähler (inkl. `excluded_flows`), DB-Statistik (inkl. `late_flows`), Live-Fenster, Historie, GeoIP-Status |
+| GET | `/api/status` | Collector-Zähler (inkl. `excluded_flows`), DB-Statistik (inkl. `late_flows`), Live-Fenster, Historie, GeoIP-Status, `anomalies_24h` (Auffälligkeiten je Schwere) |
 | GET | `/api/flows` | Flow-Suche (mit `src_geo`/`dst_geo`). Parameter: `source` (`live` Standard, `history`, `archive:<name>` – gilt für alle `/flows`- und `/stats`-Endpunkte), `from`, `to` (Unix-ms), `ip`, `src`, `dst` (IP/CIDR), `port`, `proto`, `dir` (`in`/`out`/`internal`/`external`), `limit` (≤ 5000) |
 | GET | `/api/stats/talkers` · `/ports` · `/protocols` | Aggregationen, gleiche Filterparameter |
 | GET | `/api/stats/directions` | Bytes, Pakete, Flows und ø Bandbreite je Richtung |
@@ -437,6 +517,8 @@ Snia-Net-Mon ist für den Netzbetrieb gedacht, nicht zur Überwachung einzelner 
 | GET | `/api/stats/geo` | Verkehr externer Gegenstellen nach Land (`countries`) und ASN (`asns`), `limit` ≤ 50 |
 | GET | `/api/stats/sankey` | Knoten/Kanten Quelle → Dienst → Ziel, `limit` = Anzahl Verbindungen |
 | WS | `/api/live` | beim Verbinden `{"type":"history"}`, danach jede Sekunde `{"type":"tick"}` mit Rate (gesamt, `bytes_in`, `bytes_out`), aktiven Verbindungen inkl. Richtung, Zählern und GeoIP |
+| GET | `/api/anomalies` | Auffälligkeiten, neueste zuerst. Parameter: `from`, `to` (Unix-ms), `kind` (`stat`, `ml`, `scan`, `dns`, `country`), `host`, `severity` (Mindestschwere `info`/`warn`/`high`), `limit` (≤ 5000) |
+| GET | `/api/anomalies/status` | Lernphase, Anzahl Gruppen und Host-Profile, letztes Fenster, Isolation Forest (Training, Schwelle, Score-Quantile), Zähler der letzten 24 h |
 | GET | `/api/archives` | Historie (Größe, Zeitraum, `compressing`) und Archive mit `state` (`packed`, `unpacking`, `ready`, `failed`) |
 | POST | `/api/archives/{name}/open` | Archiv öffnen (`index.db` im Hintergrund entpacken), danach mit `source=archive:{name}` abfragbar; Stundendateien entpackt die jeweilige Abfrage |
 | POST | `/api/pcap?name=datei.pcap` | Capture-Datei als Rohdaten im Body (`curl --data-binary @datei.pcap`), liefert das Analyse-Ergebnis mit `id` |
@@ -446,7 +528,7 @@ Snia-Net-Mon ist für den Netzbetrieb gedacht, nicht zur Überwachung einzelner 
 ## Entwicklung
 
 ```bash
-cargo test --workspace              # Parser-Roundtrips (v9/IPFIX), Fuzz-artige Robustheit, Retention, Historie/Archiv, Stundendateien, Upload-Alarm, Filter, PCAP/pcapng-Leser, App-Regeln, GeoIP
+cargo test --workspace              # Parser-Roundtrips (v9/IPFIX), Fuzz-artige Robustheit, Retention, Historie/Archiv, Stundendateien, Upload-Alarm, Anomalie-Erkennung (Baseline, Isolation Forest, Regeln), Filter, PCAP/pcapng-Leser, App-Regeln, GeoIP
 cargo test -p db --release -- --ignored bench --nocapture --test-threads=1   # Lastproben: Statistiken mit/ohne Aggregate, Schreiben + Retention
 cargo clippy --workspace --all-targets
 cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (:8080), Hot Reload
