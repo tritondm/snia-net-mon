@@ -26,7 +26,7 @@ seinem eigenen. Dazu kommen feste Regeln und ein Isolation Forest als zweite Mei
 | **Aufbewahrung** | live 48 h (höchstens 72 h) → Historie bis 50 GB → zstd-Archiv, gelöscht 90 Tage nach dem jüngsten Flow; siehe [Aufbewahrung](#aufbewahrung-live--historie--archiv). PCAP-Analysen folgen dem Live-Fenster, die hochgeladene Datei selbst wird direkt nach der Analyse gelöscht |
 | **Ausgenommene Netze** | `network.exclude_networks`: Verkehr von oder zu diesen Netzen wird beim Empfang verworfen – nicht gespeichert, nicht angezeigt, nicht gezählt |
 | **Upload-Alarm** | lädt eine Verbindung mehr als 1 GiB nach extern hoch, geht eine Mail an die Admins (Quelle, Ziel mit Land/ASN, Dienst, Menge, Dauer, Rate) |
-| **Anomalien** (`#anomalies`) | Statistik gegen eine Baseline je Netzgruppe und Host, Portscan, DNS an externe Resolver, erstes Land einer Gruppe, Isolation Forest als zweite Meinung. Status der Lernphase und des Modells, Verlauf der Auffälligkeiten (30 Tage) mit Filter, Klick auf den Host öffnet die Flow-Suche. Siehe [Anomalie-Erkennung](#anomalie-erkennung) |
+| **Anomalien** (`#anomalies`) | Statistik gegen eine Baseline je Netzgruppe und Host, Portscan, DNS an externe Resolver, erstes Land einer Gruppe, Netz-Regeln zwischen Zonen, Isolation Forest als zweite Meinung. Status der Lernphase und des Modells, Verlauf der Auffälligkeiten (30 Tage) mit Filter, Klick auf den Host öffnet die Flow-Suche. Siehe [Anomalie-Erkennung](#anomalie-erkennung) |
 
 Tastatur wie in Hyprland: **Alt+1 … Alt+5** wechselt den Workspace. Der Fokus folgt der Maus: Das Fenster unter dem Zeiger
 bekommt die aktive Verlaufskante.
@@ -129,6 +129,7 @@ verschiedene Dienste (Ports), verschiedene Länder**. Am Ende des Fensters wird 
 | **Portscan** | mindestens `scan_threshold` fehlgeschlagene TCP-Verbindungsversuche (SYN ohne ACK) zu verschiedenen Ziel/Port-Paaren, auch im LAN | hoch |
 | **Externes DNS** | DNS (53/853) an einen Resolver außerhalb, der nicht in `dns_servers` steht | warnung |
 | **Neues Land** | erste Verbindung einer Netzgruppe in ein Land, das sie nie zuvor kontaktiert hat | info |
+| **Netz-Regel** | Verbindung zwischen Zonen, die laut [Netz-Regeln](#netz-regeln) gemeldet werden soll, z. B. Schülernetz → Verwaltung | je Regel, Standard hoch |
 
 **Baseline:** gleitender Mittelwert und gleitende Varianz (EWMA) auf logarithmierten Werten. Ausreißer fließen nur
 gedämpft ein, damit ein Angreifer die Baseline nicht langsam „hochziehen“ kann. Es gibt zwei Ebenen:
@@ -151,13 +152,65 @@ ignore = ["10.0.10.5"]                       # Backup-Server, große Uploads sin
 dns_servers = []                             # externe Resolver, die erlaubt sind
 ```
 
-**Lernphase:** In den ersten `learning_days` (Standard 7) nach dem ersten Start wird nur gelernt. Portscan und externes
-DNS melden sofort. Der Isolation Forest trainiert nach der Lernphase und danach täglich mit den Merkmalsvektoren der
+**Lernphase:** In den ersten `learning_days` (Standard 7) nach dem ersten Start wird nur gelernt. Portscan, externes
+DNS und Netz-Regeln melden sofort. Der Isolation Forest trainiert nach der Lernphase und danach täglich mit den Merkmalsvektoren der
 letzten 14 Tage. Er meldet ab `ml_threshold`, mindestens aber ab dem 99,9-%-Quantil der eigenen Trainingsdaten. Die
 Score-Verteilung steht in der Web-UI und hilft beim Einstellen.
 
 **Zusammenfassen:** Tritt dieselbe Art beim selben Host innerhalb einer Stunde erneut auf, wird die bestehende Zeile
 verlängert („3×“) statt eine neue anzulegen. Die stärkste Messung bestimmt den Text.
+
+### Netz-Regeln
+
+Mit vielen festen Netzen lässt sich genau sagen, wer mit wem reden darf. Dazu werden Netze als **Zonen** benannt und
+**Regeln** formuliert. Die Regeln werden der Reihe nach geprüft wie in einer Firewall, die erste passende entscheidet:
+`action = "alert"` (Standard) meldet, `"allow"` erlaubt still. Flows, auf die keine Regel passt, bleiben unbeachtet.
+
+```toml
+[[anomaly.zones]]
+name = "schueler"
+networks = ["10.20.0.0/22"]
+
+[[anomaly.zones]]
+name = "verwaltung"
+networks = ["10.0.5.0/24", "10.0.6.0/24"]
+
+[[anomaly.zones]]
+name = "server"
+networks = ["10.0.10.0/28"]
+
+[[anomaly.rules]]                # Schüler dürfen DNS, HTTPS und SMB auf den Servern …
+from = "schueler"
+to = "server"
+ports = [53, 443, 445]
+action = "allow"
+
+[[anomaly.rules]]                # … alles andere dorthin ist eine Warnung
+from = "schueler"
+to = "server"
+severity = "warn"
+
+[[anomaly.rules]]                # Schülernetz → Verwaltung immer melden (Schwere hoch)
+from = "schueler"
+to = "verwaltung"
+
+[[anomaly.rules]]
+name = "smtp direkt ins internet"
+from = "*"
+to = "extern"
+ports = [25]
+```
+
+- `from` / `to`: Zonenname, `extern` (alles außerhalb von `network.local_networks`) oder `*`. Eine IP darf in mehreren
+  Zonen liegen, z. B. in `schueler` und einer übergeordneten Zone `intern`.
+- `ports`: nur diese Dienste (Zielport bei TCP/UDP), leer = alle. `severity`: `info`, `warn` oder `high`.
+- Gezählt wird nur die **Anfrage** einer Verbindung (Zielport kleiner als Quellport, bei ICMP der Echo-Request), nicht die
+  Antwort. Sonst würde die Antwort eines Verwaltungsservers an einen Schüler-PC als „verwaltung → schueler“ zählen.
+- Gemeldet wird beim internen Beteiligten, normalerweise der Quelle; bei `extern → …` das interne Ziel. Pro Host und
+  Regel entsteht eine Zeile mit Zielen, Ports und Menge, Wiederholungen innerhalb einer Stunde werden zusammengefasst.
+  `anomaly.ignore` gilt für Netz-Regeln nicht, Ausnahmen gehören als `allow`-Regel davor.
+- Netz-Regeln ersetzen keine Firewall-Regeln: Sie melden, was durchgeht, sie blockieren nichts. Gemeldet wird am Ende
+  des Fensters (Standard 10 min).
 
 **Mails** sind zunächst aus. Mit `mail = true` gehen neue Auffälligkeiten ab `mail_min_severity` (Standard `high`) an die
 Admins aus `[email]`, begrenzt durch `alerts.max_mails_per_hour`. Erst einschalten, wenn die Schwellen zum eigenen Netz
@@ -200,6 +253,7 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `anomaly.event_retention_days` | `30` | Aufbewahrung der Auffälligkeiten |
 | `anomaly.timezone` | leer | Zeitzone für Wochentag/Stunde, leer = System |
 | `anomaly.mail` / `mail_min_severity` | `false` / `high` | Mails an die Admins |
+| `[[anomaly.zones]]` / `[[anomaly.rules]]` | leer | Netz-Regeln: benannte Zonen und geordnete Regeln, siehe [Netz-Regeln](#netz-regeln) |
 | `email.smtp_host` / `smtp_port` / `security` | leer / `587` / `starttls` | SMTP-Server; `security` = `starttls`, `tls` (465) oder `none` (nur Relay im LAN). Leerer Host = kein Mailversand |
 | `email.username` / `email.password` | leer | SMTP-Anmeldung; Passwort alternativ per `SNIA_SMTP_PASSWORD` |
 | `email.from` / `email.admins` | – | Absender und Empfänger der Alarm-Mails |
@@ -261,6 +315,7 @@ Snia-Net-Mon/
 │   │   ├── features.rs        Merkmale je internem Host und Fenster, Rohdaten der Regeln
 │   │   ├── baseline.rs        EWMA-Baseline je Netzgruppe (Wochen-/Tages-Slots) und je Host
 │   │   ├── forest.rs          Isolation Forest (eigene Implementierung), Score-Quantile, Median/MAD für Erklärungen
+│   │   ├── policy.rs          Netz-Regeln: Zonen, geordnete Regeln, Anfrage-Erkennung
 │   │   ├── engine.rs          Auswertung eines Fensters, Regeln, Zusammenfassen, tägliches Training
 │   │   ├── store.rs           anomaly.db: Baselines, Länder, Trainingsvektoren (ohne IP), Auffälligkeiten
 │   │   └── lib.rs             Konfiguration, Task am Flow-Strom, optionale Mails
@@ -517,7 +572,7 @@ Snia-Net-Mon ist für den Netzbetrieb gedacht, nicht zur Überwachung einzelner 
 | GET | `/api/stats/geo` | Verkehr externer Gegenstellen nach Land (`countries`) und ASN (`asns`), `limit` ≤ 50 |
 | GET | `/api/stats/sankey` | Knoten/Kanten Quelle → Dienst → Ziel, `limit` = Anzahl Verbindungen |
 | WS | `/api/live` | beim Verbinden `{"type":"history"}`, danach jede Sekunde `{"type":"tick"}` mit Rate (gesamt, `bytes_in`, `bytes_out`), aktiven Verbindungen inkl. Richtung, Zählern und GeoIP |
-| GET | `/api/anomalies` | Auffälligkeiten, neueste zuerst. Parameter: `from`, `to` (Unix-ms), `kind` (`stat`, `ml`, `scan`, `dns`, `country`), `host`, `severity` (Mindestschwere `info`/`warn`/`high`), `limit` (≤ 5000) |
+| GET | `/api/anomalies` | Auffälligkeiten, neueste zuerst. Parameter: `from`, `to` (Unix-ms), `kind` (`stat`, `ml`, `scan`, `dns`, `country`, `policy`), `host`, `severity` (Mindestschwere `info`/`warn`/`high`), `limit` (≤ 5000) |
 | GET | `/api/anomalies/status` | Lernphase, Anzahl Gruppen und Host-Profile, letztes Fenster, Isolation Forest (Training, Schwelle, Score-Quantile), Zähler der letzten 24 h |
 | GET | `/api/archives` | Historie (Größe, Zeitraum, `compressing`) und Archive mit `state` (`packed`, `unpacking`, `ready`, `failed`) |
 | POST | `/api/archives/{name}/open` | Archiv öffnen (`index.db` im Hintergrund entpacken), danach mit `source=archive:{name}` abfragbar; Stundendateien entpackt die jeweilige Abfrage |
