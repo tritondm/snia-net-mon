@@ -12,7 +12,7 @@ seinem eigenen. Dazu kommen feste Regeln und ein Isolation Forest als zweite Mei
 - **Frontend:** Svelte 5 + Tailwind, Catppuccin-Mocha-Theme im Hyprland-Look (Frosted Glass, Verlaufskanten, Monospace)
 - **Status:** Prototyp – funktionsfähig und getestet, siehe [Grenzen & nächste Schritte](#grenzen--nächste-schritte)
 
-![Dashboard mit Live-Durchsatz, aktiven Verbindungen samt GeoIP, Verkehrsrichtung, Protokollen und Top Talkern](docs/screenshot.png)
+![Dashboard mit Live-Durchsatz, aktiven Verbindungen samt GeoIP, Verkehrsrichtung, Protokollen und Top Talkern; oben die fünf Workspaces](docs/screenshot.png)
 
 ## Funktionen
 
@@ -116,6 +116,13 @@ Zähler `collector.excluded_flows` unter `/api/status` zeigt, wie viel verworfen
 unverändert.
 
 ## Anomalie-Erkennung
+
+![Anomalie-Ansicht aus der Testumgebung: Status von Lernphase, Baseline und Isolation Forest, darunter Netz-Regel-Verstöße, ein Portscan samt statistischem Treffer, externes DNS und neue Länder](docs/anomalies.png)
+
+*Testumgebung mit flowgen-Verkehr, 1-Minuten-Fenstern, ohne Lernphase und den Regeln aus dem
+[Beispiel unten](#netz-regeln) (dazu SSH erlaubt). Die Auffälligkeiten wurden gezielt eingespielt. Ein
+Schüler-PC scannt das Server-Netz: Das ergibt den Portscan, einen statistischen Treffer (79 statt typisch 3 interne Ziele) und einen Verstoß gegen „schueler → server“.
+Die vielen „neues land“-Einträge entstehen nur, weil die Lernphase hier abgeschaltet ist.*
 
 Der Collector reicht jeden Flow auch an die Anomalie-Erkennung weiter. Sie ordnet ihn dem internen Host zu, der ihn
 verursacht (bei Upload und internem Verkehr die Quelle, bei Download das Ziel), und sammelt je Host und Fenster
