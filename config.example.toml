@@ -70,6 +70,66 @@ session_idle_secs = 600
 # Obergrenze gegen Mail-Fluten, z. B. bei Backups mit vielen parallelen Verbindungen.
 max_mails_per_hour = 20
 
+[anomaly]
+# Automatische Anomalie-Erkennung, Ergebnisse in der Web-UI unter "anomalien" (Alt+5).
+# Statistik: jeder interne Host wird je Fenster mit der Baseline seiner Netzgruppe (und in festen Netzen mit seinem
+# eigenen Profil) verglichen. Dazu feste Regeln und ein Isolation Forest als "zweite Meinung".
+enabled = true
+db = "data/anomaly.db"
+# Länge eines Auswertungsfensters (1–60 Minuten). Die Mindestwerte unten gelten pro Fenster.
+window_minutes = 10
+# So viele Tage nach dem ersten Start wird nur gelernt: Statistik, ML und "neues Land" melden nichts.
+# Portscan und externes DNS melden sofort.
+learning_days = 7
+# Gemeldet wird, wenn ein Merkmal so viele Standardabweichungen über dem Typischen liegt (auf Log-Skala; 4 ≈ Faktor 7+)
+# UND den Mindestwert erreicht.
+z_threshold = 4.0
+min_upload_mb = 100
+min_download_mb = 1024
+min_flows = 1000
+# verschiedene externe bzw. interne Gegenstellen, verschiedene Dienste (Ports), verschiedene Länder
+min_peers = 100
+min_internal_peers = 50
+min_ports = 30
+min_countries = 10
+
+# Gruppen: Standard ist das Subnetz (/24 bzw. /64). Eigene Gruppen haben Vorrang, der engste Eintrag gewinnt,
+# z. B. ein Server-Netz oder ein Server mit fester IP: groups = ["10.0.10.0/28", "10.0.0.5"]
+groups = []
+group_prefix_v4 = 24
+group_prefix_v6 = 64
+# Zusätzlich ein eigenes Profil je Host – sinnvoll bei festen Adressen. Bis es eingelernt ist (gut eine Woche),
+# gilt das Gruppenprofil.
+host_profiles = true
+# Netze mit wechselnden Adressen (DHCP, z. B. Schüler-WLAN): dort nur das Gruppenprofil, kein Profil je IP.
+dynamic_networks = []
+# Hosts, die gar nicht ausgewertet werden (z. B. ein Backup-Server).
+ignore = []
+
+# Portscan: so viele fehlgeschlagene TCP-Verbindungsversuche (SYN ohne ACK) zu verschiedenen Ziel/Port-Paaren
+# in einem Fenster; 0 = aus.
+scan_threshold = 100
+# DNS (Port 53/853) an externe Resolver statt an die pfSense melden; erlaubte externe Resolver in dns_servers.
+dns_rule = true
+dns_servers = []
+# Erste Verbindung einer Netzgruppe in ein Land, das sie bisher nie kontaktiert hat (braucht GeoIP).
+new_country = true
+
+# Isolation Forest als zweite Meinung: täglich neu trainiert mit den Merkmalen der letzten ml_training_days Tage
+# (ohne IP-Adressen). Gemeldet ab ml_threshold, mindestens aber ab dem 99,9-%-Quantil der Trainingsdaten.
+ml = true
+ml_threshold = 0.65
+ml_training_days = 14
+
+# Gemeldete Auffälligkeiten werden so lange aufbewahrt.
+event_retention_days = 30
+# Zeitzone für Wochentag und Stunde, leer = Systemzeitzone. Beispiel: "Europe/Vienna"
+timezone = ""
+# Mails an die Admins aus [email] (Obergrenze: alerts.max_mails_per_hour). Erst einschalten, wenn die Schwellen passen.
+mail = false
+# Mindest-Schwere für Mails: info, warn oder high
+mail_min_severity = "high"
+
 [email]
 # SMTP-Server für Mails an die Admins. Leer = kein Mailversand. Testen mit: snia-net-mon --test-mail
 smtp_host = ""

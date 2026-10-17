@@ -38,6 +38,8 @@ pub struct AppState {
     pub api_token: Option<Arc<str>>,
     pub started_ms: i64,
     pub geo: Arc<GeoLookup>,
+    /// Anomalie-Erkennung (`None`, wenn `[anomaly]` abgeschaltet ist)
+    pub anomaly: Option<anomaly::Anomaly>,
     pub pcap: PcapSettings,
 }
 
@@ -63,6 +65,8 @@ pub fn router(state: AppState, frontend_dir: PathBuf) -> Router {
         .route("/stats/connections", get(connections))
         .route("/stats/peers", get(peers))
         .route("/stats/geo", get(geo_stats))
+        .route("/anomalies", get(anomalies))
+        .route("/anomalies/status", get(anomaly_status))
         .route("/archives", get(archives))
         .route("/archives/{name}/open", post(open_archive))
         .route("/pcap", get(pcap::list).post(pcap::upload).layer(DefaultBodyLimit::disable()))
@@ -85,6 +89,13 @@ pub struct ApiError(StatusCode, String);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<anomaly::Error> for ApiError {
+    fn from(err: anomaly::Error) -> Self {
+        tracing::error!(%err, "Fehler der Anomalie-Erkennung");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Fehler der Anomalie-Erkennung".into())
     }
 }
 
@@ -156,6 +167,22 @@ impl AppState {
     }
 }
 
+// ------------------------------------------------------------------------------------------------------ Anomalien
+
+impl AppState {
+    fn anomaly(&self) -> Result<&anomaly::Anomaly, ApiError> {
+        self.anomaly.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Anomalie-Erkennung ist abgeschaltet ([anomaly] enabled = false)".into()))
+    }
+}
+
+async fn anomalies(State(s): State<AppState>, Query(f): Query<anomaly::EventFilter>) -> ApiResult<Vec<anomaly::EventRow>> {
+    Ok(Json(s.anomaly()?.events(f).await?))
+}
+
+async fn anomaly_status(State(s): State<AppState>) -> ApiResult<anomaly::Status> {
+    Ok(Json(s.anomaly()?.status().await?))
+}
+
 #[derive(Serialize)]
 struct Archives {
     enabled: bool,
@@ -199,6 +226,9 @@ struct Status {
     #[serde(skip_serializing_if = "Option::is_none")]
     geoip_built_ms: Option<i64>,
     pcap_max_upload_mb: u64,
+    /// Auffälligkeiten der letzten 24 h je Schwere (fehlt, wenn die Anomalie-Erkennung aus ist)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anomalies_24h: Option<anomaly::Counts>,
 }
 
 async fn status(State(s): State<AppState>) -> ApiResult<Status> {
@@ -219,6 +249,10 @@ async fn status(State(s): State<AppState>) -> ApiResult<Status> {
             country.into_iter().chain(asn).min().map(|secs| secs as i64 * 1000)
         },
         pcap_max_upload_mb: s.pcap.max_upload_bytes / 1024 / 1024,
+        anomalies_24h: match &s.anomaly {
+            Some(a) => Some(a.status().await?.counts_24h),
+            None => None,
+        },
     }))
 }
 

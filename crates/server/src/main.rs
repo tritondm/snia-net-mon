@@ -5,7 +5,8 @@
 //! pfSense (softflowd) ──UDP 2055──▶ collector ──batch──┬──▶ db (Writer-Thread → SQLite, Retention-Task)
 //!   (ausgenommene Netze werden hier verworfen)         │      └─ nach 48 h ──▶ Historie ──ab 50 GB──▶ zstd-Archiv
 //!                                                      ├──▶ api::LiveHub ──WebSocket──▶ Browser
-//!                                                      └──▶ alert (Upload > Schwelle je Verbindung) ──SMTP──▶ Admins
+//!                                                      ├──▶ alert (Upload > Schwelle je Verbindung) ──SMTP──▶ Admins
+//!                                                      └──▶ anomaly (Baseline, Regeln, Isolation Forest) ──▶ anomaly.db ──▶ Web-UI
 //! Browser ──REST──▶ api ──▶ db (Abfragen auf Live, Historie oder entpacktem Archiv)
 //! ```
 
@@ -28,6 +29,7 @@ struct Config {
     storage: StorageSection,
     history: HistorySection,
     alerts: AlertsSection,
+    anomaly: AnomalySection,
     email: EmailSection,
     geoip: GeoipSection,
     pcap: PcapSection,
@@ -134,6 +136,121 @@ struct AlertsSection {
 impl Default for AlertsSection {
     fn default() -> Self {
         Self { upload_threshold_mb: 1024, session_idle_secs: 600, max_mails_per_hour: 20 }
+    }
+}
+
+/// Automatische Anomalie-Erkennung: Baseline je Netzgruppe bzw. Host, feste Regeln, Isolation Forest als zweite Meinung.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AnomalySection {
+    enabled: bool,
+    db: PathBuf,
+    window_minutes: u64,
+    learning_days: u64,
+    z_threshold: f64,
+    min_upload_mb: f64,
+    min_download_mb: f64,
+    min_flows: f64,
+    min_peers: f64,
+    min_internal_peers: f64,
+    min_ports: f64,
+    min_countries: f64,
+    groups: Vec<String>,
+    group_prefix_v4: u8,
+    group_prefix_v6: u8,
+    host_profiles: bool,
+    dynamic_networks: Vec<String>,
+    ignore: Vec<String>,
+    scan_threshold: usize,
+    dns_rule: bool,
+    dns_servers: Vec<String>,
+    new_country: bool,
+    ml: bool,
+    ml_threshold: f64,
+    ml_training_days: u64,
+    event_retention_days: u64,
+    timezone: String,
+    mail: bool,
+    mail_min_severity: String,
+}
+
+impl Default for AnomalySection {
+    fn default() -> Self {
+        let d = anomaly::AnomalyConfig::default();
+        let mib = 1024.0 * 1024.0;
+        Self {
+            enabled: true,
+            db: d.db_path,
+            window_minutes: d.window.as_secs() / 60,
+            learning_days: d.learning_days,
+            z_threshold: d.z_threshold,
+            min_upload_mb: d.minimums[0] / mib,
+            min_download_mb: d.minimums[1] / mib,
+            min_flows: d.minimums[2],
+            min_peers: d.minimums[3],
+            min_internal_peers: d.minimums[4],
+            min_ports: d.minimums[5],
+            min_countries: d.minimums[6],
+            groups: Vec::new(),
+            group_prefix_v4: d.group_prefix_v4,
+            group_prefix_v6: d.group_prefix_v6,
+            host_profiles: d.host_profiles,
+            dynamic_networks: Vec::new(),
+            ignore: Vec::new(),
+            scan_threshold: d.scan_threshold,
+            dns_rule: d.dns_rule,
+            dns_servers: Vec::new(),
+            new_country: d.new_country,
+            ml: d.ml,
+            ml_threshold: d.ml_threshold,
+            ml_training_days: d.ml_training_days,
+            event_retention_days: d.event_retention_days,
+            timezone: String::new(),
+            mail: d.mail,
+            mail_min_severity: d.mail_min_severity.name().into(),
+        }
+    }
+}
+
+impl AnomalySection {
+    fn config(&self, secure_delete: bool, max_mails_per_hour: u32) -> Result<anomaly::AnomalyConfig> {
+        let nets = |key: &str, list: &[String]| model::LocalNetworks::parse(list).map_err(|e| anyhow::anyhow!("anomaly.{key}: {e}"));
+        let mib = 1024.0 * 1024.0;
+        Ok(anomaly::AnomalyConfig {
+            db_path: self.db.clone(),
+            secure_delete,
+            window: Duration::from_secs(self.window_minutes.clamp(1, 60) * 60),
+            learning_days: self.learning_days.min(365),
+            z_threshold: self.z_threshold.clamp(1.0, 50.0),
+            minimums: [
+                self.min_upload_mb.max(0.0) * mib,
+                self.min_download_mb.max(0.0) * mib,
+                self.min_flows.max(0.0),
+                self.min_peers.max(0.0),
+                self.min_internal_peers.max(0.0),
+                self.min_ports.max(0.0),
+                self.min_countries.max(0.0),
+            ],
+            groups: self.groups.clone(),
+            group_prefix_v4: self.group_prefix_v4,
+            group_prefix_v6: self.group_prefix_v6,
+            host_profiles: self.host_profiles,
+            dynamic_networks: nets("dynamic_networks", &self.dynamic_networks)?,
+            ignore: nets("ignore", &self.ignore)?,
+            scan_threshold: self.scan_threshold,
+            dns_rule: self.dns_rule,
+            dns_servers: nets("dns_servers", &self.dns_servers)?,
+            new_country: self.new_country,
+            ml: self.ml,
+            ml_threshold: self.ml_threshold.clamp(0.5, 1.0),
+            ml_training_days: self.ml_training_days.clamp(1, 90),
+            event_retention_days: self.event_retention_days.clamp(1, 3650),
+            timezone: Some(self.timezone.clone()).filter(|t| !t.trim().is_empty()),
+            mail: self.mail,
+            mail_min_severity: anomaly::Severity::parse(&self.mail_min_severity)
+                .ok_or_else(|| anyhow::anyhow!("anomaly.mail_min_severity: erlaubt sind info, warn, high – nicht {:?}", self.mail_min_severity))?,
+            max_mails_per_hour,
+        })
     }
 }
 
@@ -380,8 +497,19 @@ async fn main() -> Result<()> {
     let live = api::LiveHub::spawn(live_rx, metrics.clone(), geo.clone(), shutdown_rx.clone());
     let mut sinks = vec![db_tx, live_tx];
 
-    // --- Upload-Alarm
+    // --- Upload-Alarm und Anomalie-Erkennung
     let mailer = config.email.mailer()?;
+    let anomaly = if config.anomaly.enabled {
+        let (anomaly_tx, anomaly_rx) = mpsc::channel(256);
+        sinks.push(anomaly_tx);
+        let cfg = config.anomaly.config(config.storage.secure_delete, config.alerts.max_mails_per_hour.max(1))?;
+        let (handle, task) = anomaly::spawn(cfg, anomaly_rx, geo.clone(), mailer.clone(), shutdown_rx.clone())
+            .map_err(|e| anyhow::anyhow!("Anomalie-Erkennung: {e}"))?;
+        Some((handle, task))
+    } else {
+        tracing::info!("Anomalie-Erkennung abgeschaltet ([anomaly] enabled = false)");
+        None
+    };
     let alerts = &config.alerts;
     let upload_watch = if alerts.upload_threshold_mb > 0 {
         match &mailer {
@@ -432,6 +560,7 @@ async fn main() -> Result<()> {
         api_token: (!token.is_empty()).then(|| Arc::from(token)),
         started_ms: model::now_ms(),
         geo,
+        anomaly: anomaly.as_ref().map(|(handle, _)| handle.clone()),
         pcap: api::PcapSettings {
             upload_dir: config.pcap.upload_dir.clone(),
             max_upload_bytes: config.pcap.max_upload_mb.clamp(1, 16 * 1024) * 1024 * 1024,
@@ -466,6 +595,9 @@ async fn main() -> Result<()> {
     let _ = cleanup.await;
     if let Some(watch) = upload_watch {
         let _ = watch.await;
+    }
+    if let Some((_, task)) = anomaly {
+        let _ = task.await;
     }
     geo_updater.abort();
     tokio::task::spawn_blocking(move || writer.join()).await?.ok();
