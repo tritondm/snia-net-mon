@@ -1,6 +1,8 @@
 # Snia-Net-Mon
 
-Netzwerkmonitor für eine **pfSense-Firewall**. Er sammelt Verbindungsdaten per **NetFlow v9 / IPFIX**, zeigt sie live im Browser – mit
+Netzwerkmonitor für alles, was **NetFlow v9 oder IPFIX** exportiert: Firewalls (pfSense, OPNsense, Fortinet …), Router und
+Switches (MikroTik, Cisco, Juniper …) oder eine Software-Probe auf einem Linux-Rechner (softflowd, ipt-netflow, pmacct).
+Er sammelt die Verbindungsdaten, zeigt sie live im Browser – mit
 **GeoIP (Land, ASN)** für jede externe Gegenstelle – und macht sie durchsuchbar. Dazu kommt eine **PCAP-Analyse** für
 Mitschnitte (pcap/pcapng). Die Live-Daten umfassen die letzten **48 Stunden**, gespeichert als eine SQLite-Datei pro
 Stunde. Ältere Stunden wandern in eine **Historie**, die ab 50 GB in ein **zstd-Archiv** rotiert wird. Archive bleiben
@@ -20,7 +22,7 @@ seinem eigenen. Dazu kommen feste Regeln und ein Isolation Forest als zweite Mei
 |---|---|
 | **Dashboard** (`#dashboard`) | Live-Durchsatz getrennt nach **Download ↓ und Upload ↑** (gespiegelter Chart) per WebSocket, Verkehrsrichtung im Zeitfenster, Tabelle der aktiven Verbindungen mit Richtung (einfrierbar, filterbar). **Bereich im Durchsatz-Chart mit der Maus markieren** hält Chart und Tabelle an und zeigt die Verbindungen genau dieses Zeitraums (Klick oder Esc = zurück zu live), Top Talker, Top Ports, **Länder und Netze (ASN)** der Gegenstellen, Protokollverteilung, Sankey-Diagramm Quelle → Dienst → Ziel. Alle Statistiken lassen sich nach Richtung filtern |
 | **Flow-Suche** (`#flows`) | Filter nach IP **oder CIDR** (Quelle/Ziel/beides), Port, Protokoll, Richtung, Zeitfenster; CSV-Export. Darunter die **Top Talker grafisch** mit ihren stärksten Gegenstellen (Dienst, gesendet/empfangen). Klick auf eine IP im Dashboard springt direkt hierher |
-| **PCAP** (`#pcap`) | Capture-Datei (pcap/pcapng, z. B. aus *Diagnostics → Packet Capture*) per Drag & Drop hochladen: Kennzahlen, Zeitverlauf, Protokolle, **Anwendungen** (YouTube, Microsoft 365, CDN, AI … über TLS-SNI, DNS, HTTP-Host, IP-Präfixe), **Endpunkte mit Land und ASN**, Länder, Top Quellen/Ports/Flows, DNS, HTTP, TCP-Flags und heuristische **Auffälligkeiten** (Portscan, NXDOMAIN-Häufung, DNS/HTTP auf Nicht-Standard-Ports). Verlauf der Analysen; Klick auf eine IP sucht sie in den NetFlow-Daten |
+| **PCAP** (`#pcap`) | Capture-Datei (pcap/pcapng, z. B. von tcpdump, Wireshark oder der Paketaufzeichnung der Firewall) per Drag & Drop hochladen: Kennzahlen, Zeitverlauf, Protokolle, **Anwendungen** (YouTube, Microsoft 365, CDN, AI … über TLS-SNI, DNS, HTTP-Host, IP-Präfixe), **Endpunkte mit Land und ASN**, Länder, Top Quellen/Ports/Flows, DNS, HTTP, TCP-Flags und heuristische **Auffälligkeiten** (Portscan, NXDOMAIN-Häufung, DNS/HTTP auf Nicht-Standard-Ports). Verlauf der Analysen; Klick auf eine IP sucht sie in den NetFlow-Daten |
 | **Archiv** (`#archive`) | Füllstand der Historie, Liste der Archive mit Zeitraum, Größe und Löschdatum. **Historie oder ein Archiv durchsuchen**: öffnet die Flow-Suche mit dieser Datenquelle (aus Archiven wird nur entpackt, was eine Abfrage braucht) |
 | **GeoIP** | Land, Organisation und ASN für alle öffentlichen IPs – in der Live-Tabelle, Flow-Suche (auch CSV), Top Talker, Sankey und PCAP-Analyse |
 | **Aufbewahrung** | live 48 h (höchstens 72 h) → Historie bis 50 GB → zstd-Archiv, gelöscht 90 Tage nach dem jüngsten Flow; siehe [Aufbewahrung](#aufbewahrung-live--historie--archiv). PCAP-Analysen folgen dem Live-Fenster, die hochgeladene Datei selbst wird direkt nach der Analyse gelöscht |
@@ -31,7 +33,7 @@ seinem eigenen. Dazu kommen feste Regeln und ein Isolation Forest als zweite Mei
 Tastatur wie in Hyprland: **Alt+1 … Alt+5** wechselt den Workspace. Der Fokus folgt der Maus: Das Fenster unter dem Zeiger
 bekommt die aktive Verlaufskante.
 
-## Schnellstart (Demo ohne pfSense)
+## Schnellstart (Demo ohne Exporter)
 
 Voraussetzungen: Rust ≥ 1.88, Node ≥ 20.
 
@@ -73,19 +75,49 @@ geladen wird nur, was neuer ist. Die neue Datei wird geprüft, atomar ersetzt un
 `[geoip]` änderbar). Ersetzte Dateien – auch durch MaxMinds Tool `geoipupdate` per Cron – erkennt der Server innerhalb von
 10 Minuten und lädt sie neu.
 
-## Anbindung an die pfSense
+## Flow-Export einrichten
 
-### NetFlow-Export (softflowd)
+Snia-Net-Mon nimmt NetFlow v9 und IPFIX per UDP an (Standard Port `2055`, `collector.listen`). Mehrere Exporter gleichzeitig
+sind möglich, ihre Templates werden getrennt verwaltet. Was der Exporter liefern sollte:
+
+| Einstellung | Empfehlung | Warum |
+|---|---|---|
+| Ziel | IP des Rechners mit Snia-Net-Mon, UDP `2055` | |
+| Format | NetFlow **v9** oder **IPFIX** (Version 10) | v5 und sFlow werden nicht unterstützt |
+| Felder | Adressen (IPv4/IPv6), Ports, Protokoll, Bytes, Pakete, Start/Ende, TCP-Flags | TCP-Flags braucht die Portscan-Erkennung; Interface-Indizes sind optional |
+| Sampling | **aus** (jeder Flow, 1:1) | gesampelte Daten werden nicht hochgerechnet, Mengen wären zu klein |
+| Active Timeout | kurz, z. B. 60 s | lange Verbindungen erscheinen sonst erst nach Minuten |
+| Messpunkt | die **internen** Interfaces (LAN, VLANs) | vor dem NAT sind die internen Adressen sichtbar; wer zusätzlich am WAN exportiert, zählt Internetverkehr doppelt |
+
+Nach kurzer Zeit erscheinen die Flows im Dashboard. Solange ein Exporter seine Templates noch nicht (erneut) gesendet hat,
+zählt der Collector die Daten als `missing_template` (Zähler unter `/api/status`). Danach `network.local_networks` prüfen,
+siehe [Verkehrsrichtung](#download--upload-verkehrsrichtung).
+
+### Beispiel: pfSense (softflowd)
 
 1. **System → Package Manager → Available Packages:** `softflowd` installieren.
 2. **Services → softflowd:**
-   - *Interface:* die zu überwachenden Interfaces (z. B. LAN, WAN)
+   - *Interface:* die internen Interfaces (LAN, VLANs)
    - *Host:* IP des Rechners mit Snia-Net-Mon, *Port:* `2055`
    - *NetFlow version:* `9` oder `IPFIX (10)`
    - *Flow tracking level:* `Full` (5-Tupel mit Ports)
    - *Flow Timeouts:* kurze Werte ergeben „livere“ Daten, z. B. `maxlife 60`
-3. Speichern. Nach kurzer Zeit erscheinen die Flows im Dashboard. Solange der Exporter seine Templates noch nicht erneut
-   gesendet hat, zählt der Collector die Daten als `missing_template` (Zähler unter `/api/status`).
+3. Speichern.
+
+### Andere Exporter
+
+Die Einstellungen heißen überall etwas anders, gemeint ist immer die Tabelle oben. Wo man sie findet:
+
+| Exporter | Ort der Einstellung |
+|---|---|
+| OPNsense | *Reporting → NetFlow*: Interfaces wählen, Version v9, Ziel `IP:2055` |
+| MikroTik RouterOS | *IP → Traffic Flow*: aktivieren, Interfaces wählen, unter *Targets* Ziel und Version 9 oder IPFIX |
+| Linux (Router, Mirror-Port) | `softflowd -i eth0 -n IP:2055 -v 9`, alternativ ipt-netflow oder pmacct (`nfprobe`) |
+| Cisco, Juniper, Fortinet, Ubiquiti … | Flexible NetFlow, J-Flow/IPFIX, NetFlow-Export: Version 9 oder IPFIX, ohne Sampling |
+
+Getestet ist Snia-Net-Mon mit pfSense/softflowd und dem mitgelieferten Generator `flowgen`. Andere Exporter sollten
+funktionieren, solange sie die üblichen Standardfelder senden. Wenn nicht: Der Zähler `parse_errors` bzw.
+`missing_template` unter `/api/status` und das Log (`RUST_LOG=debug`) zeigen, wo es hakt.
 
 ## Download / Upload (Verkehrsrichtung)
 
@@ -98,13 +130,13 @@ Jeder Flow bekommt beim Empfang eine Richtung. Grundlage ist die Liste der inter
 | `internal` ⇄ | intern ↔ intern | SMB zwischen LAN und Server-VLAN |
 | `external` | weder noch | sollte selten vorkommen; häufig ein Hinweis, dass ein eigenes Netz in der Liste fehlt |
 
-softflowd exportiert jede Verbindung als zwei Flows (Anfrage und Antwort). Deshalb erscheint ein Download als großer `in`-Flow
+Die meisten Exporter (z. B. softflowd) melden jede Verbindung als zwei Flows (Anfrage und Antwort). Deshalb erscheint ein Download als großer `in`-Flow
 plus kleiner `out`-Flow. Der Dienst (Top Ports, Sankey, Spalte „Dienst“) ist jeweils der kleinere der beiden Ports, also 443
 und nicht der zufällige Client-Port.
 
 Standardmäßig gelten die privaten Bereiche (RFC 1918, CGNAT, Link-Local, IPv6-ULA) als intern. Mit **öffentlichem IPv6** vom
 Provider muss dessen Präfix in `local_networks` ergänzt werden, sonst läuft IPv6-Verkehr unter „extern“. Dasselbe gilt für die
-WAN-Adresse, wenn Verbindungen zur Firewall selbst als Download zählen sollen. Die Richtung wird beim Empfang gespeichert. Eine
+öffentliche Adresse des Exporters (z. B. die WAN-Adresse der Firewall), wenn Verbindungen zu ihm selbst als Download zählen sollen. Die Richtung wird beim Empfang gespeichert. Eine
 geänderte Liste wirkt daher nur auf neue Flows.
 
 ### Ausgenommene Netze
@@ -230,8 +262,8 @@ ports = [25]
 
 ### Beispiel: Schülernetz und Verwaltung
 
-Eine Schule hat drei Netze, die interessieren (die Adressen sind Beispiele, die eigenen stehen in der pfSense unter
-*Interfaces*):
+Eine Schule hat drei Netze, die interessieren (die Adressen sind Beispiele, die eigenen stehen in der Firewall bzw. im
+Router bei den Interfaces):
 
 | Netz | Adressen | Vergabe |
 |---|---|---|
@@ -366,8 +398,8 @@ Mailversand prüfen: `snia-net-mon --test-mail [config.toml]` schickt eine Test-
 ## Architektur
 
 ```text
-pfSense (softflowd) ──UDP 2055──▶ collector ──Batches──┬──▶ db: Writer-Thread ──▶ live/ (index.db + Datei je Stunde, 48 h)
-                                  (n Worker,            │        Retention-Task ──▶ history/ ──50 GB──▶ archive/flows_<von>_<bis>/
+Exporter (Firewall, ──UDP 2055──▶ collector ──Batches──┬──▶ db: Writer-Thread ──▶ live/ (index.db + Datei je Stunde, 48 h)
+Router, softflowd …)              (n Worker,            │        Retention-Task ──▶ history/ ──50 GB──▶ archive/flows_<von>_<bis>/
                                    SO_REUSEPORT,        ├──▶ api::LiveHub ──1×/s──▶ WebSocket ──▶ Browser
                                    exclude_networks)    ├──▶ alert: Upload je Verbindung > 1 GiB ──SMTP──▶ Admins
                                                         └──▶ anomaly: Fenster je Host ──▶ Baseline, Regeln, Isolation Forest ──▶ anomaly.db
@@ -563,7 +595,7 @@ Wie lange Daten damit insgesamt aufbewahrt werden und was das für den Datenschu
 
 ### Upload-Alarm
 
-softflowd meldet eine lange Verbindung mehrfach (je `maxlife`). Der Alarm summiert deshalb die ausgehenden Bytes
+Exporter melden eine lange Verbindung mehrfach (je Active Timeout, bei softflowd `maxlife`). Der Alarm summiert deshalb die ausgehenden Bytes
 (Richtung `out`) je **Verbindung** (Quelle, Ziel, Ports, Protokoll) über alle ihre Flows. Beim Überschreiten von
 `upload_threshold_mb` geht **eine** Mail an `email.admins` mit Quelle, Ziel (Land, ASN), Dienst, Menge, Beginn, Dauer und
 Rate. Die Verbindung wird danach nicht erneut gemeldet. Ohne neue Flows seit `session_idle_secs` gilt sie als beendet.
@@ -578,7 +610,7 @@ Mailversand oder wenn `max_mails_per_hour` erreicht ist.
 
 ## Datenschutz
 
-Snia-Net-Mon zeichnet auf, welches Gerät wann mit wem wie viel Daten ausgetauscht hat. Über die DHCP-Leases der pfSense,
+Snia-Net-Mon zeichnet auf, welches Gerät wann mit wem wie viel Daten ausgetauscht hat. Über die Leases des DHCP-Servers,
 Anmeldungen am WLAN oder feste Gerätezuordnungen lassen sich IP-Adressen meist einer Person zuordnen – die gespeicherten
 Daten sind deshalb **personenbezogen** im Sinne der DSGVO. Das gilt besonders an Schulen, wo Schülerinnen und Schüler
 (oft minderjährig) und Lehrkräfte dasselbe Netz nutzen.
@@ -697,7 +729,9 @@ cd frontend && npm run dev          # Vite auf :5173 mit Proxy auf das Backend (
 - **Abfragen über sehr viele Stunden** mit IP-, Port- oder Protokollfilter (z. B. eine IP über drei Monate Historie)
   öffnen jede Stundendatei einzeln und dauern entsprechend. In einem Archiv entpacken sie zudem alle Stunden und
   brauchen dann so viel freien Platz wie die ursprüngliche Historie.
-- **NetFlow v5 / sFlow** werden nicht unterstützt, softflowd kann v9/IPFIX.
+- **NetFlow v5, sFlow und IPFIX-Biflows** (beide Richtungen in einem Datensatz, RFC 5103) werden nicht unterstützt.
+  **Gesampelte** Exporte werden nicht hochgerechnet: Mengen erscheinen um den Sampling-Faktor zu klein, und die
+  Anomalie-Erkennung sieht nur einen Teil der Verbindungen.
 - **Zeitstempel:** Flows werden nach ihrem Ende (`ts`) einsortiert. Lange Flows erscheinen im Durchsatz-Chart daher als Spitze
   zum Exportzeitpunkt, wie bei NetFlow üblich.
 - **PCAP-Analyse** erkennt Anwendungen nur über unverschlüsselte Merkmale (SNI, DNS, HTTP-Host). Mit ECH (Encrypted Client
