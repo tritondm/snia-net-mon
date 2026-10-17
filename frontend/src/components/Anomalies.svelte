@@ -303,7 +303,9 @@
                       <span class="chip">alle {fmtInterval(r.detail.interval_s)} ± {Math.round(r.detail.jitter * 100)} %</span>
                       <span class="chip">je ~{fmtBytes(r.detail.median_bytes)}</span>
                       <span class="chip">{fmtDate(r.detail.first_ms)} – {fmtDate(r.detail.last_ms)}</span>
-                      <span class="chip">{r.detail.hosts_for_peer} {r.detail.hosts_for_peer === 1 ? 'host nutzt' : 'hosts nutzen'} dieses ziel</span>
+                      {#if r.detail.fleet_hosts > 1}
+                        <span class="chip">{r.detail.fleet_hosts} hosts mit gleichem muster zu {r.detail.asn ? `AS${r.detail.asn}` : 'diesem netz'}</span>
+                      {/if}
                     </div>
                     <div class="mt-1 text-ctp-overlay0">nur ein hinweis: auch updates, push-dienste oder geräte, die ihren status melden, verbinden sich regelmäßig</div>
                   {:else if r.kind === 'country'}

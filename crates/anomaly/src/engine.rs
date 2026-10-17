@@ -616,7 +616,7 @@ fn beacon_event(ts: i64, group: &str, f: &Finding, info: &beacon::PeerInfo) -> E
             "median_bytes": f.median_bytes,
             "first_ms": f.first_ms,
             "last_ms": f.last_ms,
-            "hosts_for_peer": f.hosts_for_peer,
+            "fleet_hosts": f.fleet_hosts,
         }),
     }
 }

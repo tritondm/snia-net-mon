@@ -120,8 +120,8 @@ beacon = true
 beacon_min_connections = 20
 beacon_min_minutes = 120
 beacon_max_jitter = 0.2
-# Nutzen so viele interne Hosts dasselbe Ziel, gilt es als normaler Dienst.
-beacon_max_hosts = 10
+# Zeigen so viele interne Hosts das Muster zum selben Anbieter (ASN) und Port, gilt es als ausgerollte Software.
+beacon_max_hosts = 3
 # Ausnahmen: interne Hosts oder externe Ziele (IP oder Netz), Anbieter (ASN, z. B. 8075 Microsoft) und Zielports.
 beacon_allow = []
 beacon_allow_asn = []

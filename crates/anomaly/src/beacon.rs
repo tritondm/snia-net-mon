@@ -4,8 +4,9 @@
 //!
 //! Je Paar (interner Host, externes Ziel, Port, Protokoll) merkt sich der [`Tracker`] die Startzeiten der Verbindungen
 //! der letzten [`HISTORY_MS`] im Speicher. Nach jedem Fenster wird ausgewertet: genug Verbindungen über eine Mindestdauer,
-//! Abstände mit kleiner Streuung (Median und MAD, robust gegen einzelne ausgefallene Meldungen) und ein Ziel, das nicht
-//! viele interne Hosts nutzen (das wäre eher ein Update- oder Push-Dienst).
+//! Abstände mit kleiner Streuung (Median und MAD, robust gegen einzelne ausgefallene Meldungen). Zeigen viele interne
+//! Hosts dasselbe Muster zum selben Anbieter und Port, ist das ausgerollte Software (Virenschutz, Push-Dienste, Office) –
+//! Cloud-Dienste wechseln dabei oft die IP, deshalb zählt der Anbieter (ASN, ersatzweise das /24- bzw. /48-Netz).
 
 use model::LocalNetworks;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -33,7 +34,7 @@ pub struct BeaconConfig {
     pub min_minutes: u64,
     /// Erlaubte typische Abweichung der Abstände vom Median (0.2 = 20 %)
     pub max_jitter: f64,
-    /// Nutzen so viele interne Hosts dasselbe Ziel, gilt es als normaler Dienst
+    /// Zeigen so viele interne Hosts das Muster zum selben Anbieter und Port, gilt es als normaler Dienst
     pub max_hosts: usize,
     /// Ausnahmen: interne Hosts oder externe Ziele (IP oder CIDR)
     pub allow: LocalNetworks,
@@ -50,7 +51,7 @@ impl Default for BeaconConfig {
             min_connections: 20,
             min_minutes: 120,
             max_jitter: 0.2,
-            max_hosts: 10,
+            max_hosts: 3,
             allow: LocalNetworks::none(),
             allow_asn: HashSet::new(),
             allow_ports: HashSet::from([123]),
@@ -86,8 +87,8 @@ pub struct Finding {
     pub median_bytes: u64,
     pub first_ms: i64,
     pub last_ms: i64,
-    /// interne Hosts, die dasselbe Ziel nutzen
-    pub hosts_for_peer: usize,
+    /// interne Hosts mit Muster zum selben Anbieter und Port (einschließlich dieses)
+    pub fleet_hosts: usize,
 }
 
 #[derive(Debug, Default)]
@@ -154,51 +155,86 @@ impl Tracker {
 
     /// Paare mit neuen Verbindungen auf ein regelmäßiges Muster prüfen.
     pub fn analyze(&self, cfg: &BeaconConfig) -> Vec<Finding> {
-        // Wie viele interne Hosts nutzen jedes Ziel? Ein Ziel vieler Hosts ist eher ein gewöhnlicher Dienst.
-        let mut hosts_per_peer: HashMap<IpAddr, HashSet<IpAddr>> = HashMap::new();
-        for (host, peer, _, _) in self.pairs.keys() {
-            hosts_per_peer.entry(*peer).or_default().insert(*host);
-        }
-        let mut found = Vec::new();
+        // Muster aller Paare, auch der ohne neue Verbindungen – sie zählen für die Flotten-Prüfung mit
+        let mut patterns = Vec::new();
         for (key, pair) in &self.pairs {
-            let n = pair.conns.len();
-            if !pair.updated || n < cfg.min_connections.max(3) {
-                continue;
+            if let Some(f) = pattern(key, pair, cfg) {
+                patterns.push((pair.updated, f));
             }
-            let hosts_for_peer = hosts_per_peer.get(&key.1).map_or(0, HashSet::len);
-            if hosts_for_peer >= cfg.max_hosts.max(1) {
-                continue;
-            }
-            let first = pair.conns.front().map_or(0, |c| c.0);
-            let last = pair.conns.back().map_or(0, |c| c.0);
-            if last - first < cfg.min_minutes as i64 * 60_000 {
-                continue;
-            }
-            let gaps: Vec<f64> = pair.conns.iter().zip(pair.conns.iter().skip(1)).map(|(a, b)| (b.0 - a.0) as f64).collect();
-            let interval = median(&gaps);
-            if interval < MIN_INTERVAL_MS {
-                continue;
-            }
-            let deviations: Vec<f64> = gaps.iter().map(|g| (g - interval).abs()).collect();
-            let jitter = median(&deviations) / interval;
-            if jitter > cfg.max_jitter {
-                continue;
-            }
-            let bytes: Vec<f64> = pair.conns.iter().map(|c| c.1 as f64).collect();
-            found.push(Finding {
-                key: *key,
-                connections: n,
-                interval_s: interval / 1000.0,
-                jitter,
-                median_bytes: median(&bytes) as u64,
-                first_ms: first,
-                last_ms: last,
-                hosts_for_peer,
-            });
         }
+        // Wie viele interne Hosts zeigen das Muster zum selben Anbieter und Port?
+        let mut fleet: HashMap<(Net, u16, u8), HashSet<IpAddr>> = HashMap::new();
+        for (_, f) in &patterns {
+            fleet.entry(self.fleet_key(&f.key)).or_default().insert(f.key.0);
+        }
+        let mut found: Vec<Finding> = patterns
+            .into_iter()
+            .filter(|(updated, _)| *updated)
+            .map(|(_, mut f)| {
+                f.fleet_hosts = fleet.get(&self.fleet_key(&f.key)).map_or(1, HashSet::len);
+                f
+            })
+            .filter(|f| f.fleet_hosts < cfg.max_hosts.max(1))
+            .collect();
         found.sort_by_key(|f| (f.key.0, f.key.1, f.key.2));
         found
     }
+
+    fn fleet_key(&self, key: &Key) -> (Net, u16, u8) {
+        let net = match self.info.get(&key.1).and_then(|i| i.asn) {
+            Some(asn) => Net::Asn(asn),
+            None => Net::Prefix(prefix(key.1)),
+        };
+        (net, key.2, key.3)
+    }
+}
+
+/// Anbieter eines Ziels: autonomes System oder, wenn unbekannt, das /24- bzw. /48-Netz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Net {
+    Asn(u32),
+    Prefix(IpAddr),
+}
+
+fn prefix(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4((u32::from(v4) & 0xffff_ff00).into()),
+        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !((1u128 << 80) - 1)).into()),
+    }
+}
+
+/// Regelmäßiges Muster eines Paares, unabhängig von anderen Paaren.
+fn pattern(key: &Key, pair: &Pair, cfg: &BeaconConfig) -> Option<Finding> {
+    let n = pair.conns.len();
+    if n < cfg.min_connections.max(3) {
+        return None;
+    }
+    let first = pair.conns.front()?.0;
+    let last = pair.conns.back()?.0;
+    if last - first < cfg.min_minutes as i64 * 60_000 {
+        return None;
+    }
+    let gaps: Vec<f64> = pair.conns.iter().zip(pair.conns.iter().skip(1)).map(|(a, b)| (b.0 - a.0) as f64).collect();
+    let interval = median(&gaps);
+    if interval < MIN_INTERVAL_MS {
+        return None;
+    }
+    let deviations: Vec<f64> = gaps.iter().map(|g| (g - interval).abs()).collect();
+    let jitter = median(&deviations) / interval;
+    if jitter > cfg.max_jitter {
+        return None;
+    }
+    let bytes: Vec<f64> = pair.conns.iter().map(|c| c.1 as f64).collect();
+    Some(Finding {
+        key: *key,
+        connections: n,
+        interval_s: interval / 1000.0,
+        jitter,
+        median_bytes: median(&bytes) as u64,
+        first_ms: first,
+        last_ms: last,
+        fleet_hosts: 1,
+    })
 }
 
 fn median(values: &[f64]) -> f64 {
@@ -270,9 +306,9 @@ mod tests {
         let mut conns = HashMap::new();
         // nur 30 Minuten lang
         conns.insert((ip("10.0.1.5"), ip("198.51.100.7"), 443, 6), series(0, 30, 60_000, 0));
-        // dasselbe Ziel bei drei Hosts (max_hosts = 3) – ein gewöhnlicher Dienst
+        // dasselbe Muster bei drei Hosts (max_hosts = 3) zu verschiedenen IPs desselben Netzes – ausgerollte Software
         for h in 10..13 {
-            conns.insert((ip(&format!("10.0.1.{h}")), ip("198.51.100.8"), 443, 6), series(0, 200, 60_000, 0));
+            conns.insert((ip(&format!("10.0.1.{h}")), ip(&format!("198.51.100.{h}")), 8883, 6), series(0, 200, 300_000, 0));
         }
         t.merge(conns, HashMap::new(), 200 * 60_000);
         assert!(t.analyze(&cfg()).is_empty());
@@ -284,6 +320,29 @@ mod tests {
         assert_eq!(t.analyze(&cfg()).len(), 1);
         t.merge(HashMap::new(), HashMap::new(), 210 * 60_000);
         assert!(t.analyze(&cfg()).is_empty());
+    }
+
+    #[test]
+    fn fleets_are_grouped_by_asn_and_port() {
+        let mut t = Tracker::default();
+        let info = |asn| PeerInfo { asn: Some(asn), ..PeerInfo::default() };
+        let mut conns = HashMap::new();
+        let mut peers = HashMap::new();
+        // drei Hosts zu drei IPs aus verschiedenen Netzen, aber demselben Anbieter: Flotte
+        for (h, peer) in [(10, "192.0.2.10"), (11, "198.51.100.20"), (12, "203.0.113.30")] {
+            conns.insert((ip(&format!("10.0.1.{h}")), ip(peer), 8883, 6), series(0, 40, 300_000, 0));
+            peers.insert(ip(peer), info(64501));
+        }
+        // derselbe Anbieter auf anderem Port und ein einzelner Host bei einem anderen Anbieter: bleiben
+        conns.insert((ip("10.0.1.20"), ip("192.0.2.50"), 443, 6), series(0, 40, 300_000, 0));
+        conns.insert((ip("10.0.1.21"), ip("203.0.113.9"), 8883, 6), series(0, 40, 300_000, 0));
+        peers.insert(ip("192.0.2.50"), info(64501));
+        peers.insert(ip("203.0.113.9"), info(64500));
+        t.merge(conns, peers, 40 * 300_000);
+        let found = t.analyze(&cfg());
+        let hosts: Vec<IpAddr> = found.iter().map(|f| f.key.0).collect();
+        assert_eq!(hosts, vec![ip("10.0.1.20"), ip("10.0.1.21")], "{found:?}");
+        assert!(found.iter().all(|f| f.fleet_hosts == 1));
     }
 
     #[test]
