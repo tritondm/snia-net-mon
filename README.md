@@ -10,6 +10,12 @@ Stunde. Ältere Stunden wandern in eine **Historie**, die ab 50 GB in ein **zstd
 Anomalie-Erkennung** vergleicht jeden internen Host mit dem Normalverhalten seines Netzes und, bei festen Adressen, mit
 seinem eigenen. Dazu kommen feste Regeln und ein Isolation Forest als zweite Meinung.
 
+Ursprünglich ist Snia-Net-Mon **für Schulen** entstanden: viele feste Netze für Verwaltung und Unterricht, ein Schülernetz
+mit wechselnden Adressen, wenig Zeit für die Betreuung und personenbezogene Daten von oft minderjährigen Schülerinnen und
+Schülern. Daher kommen das [Beispiel Schülernetz und Verwaltung](#beispiel-schülernetz-und-verwaltung) und der
+ausführliche Abschnitt zum [Datenschutz](#datenschutz). Genauso gut passt es in jedes andere Netz mit NetFlow- oder
+IPFIX-Export.
+
 - **Backend:** Rust (Tokio, Axum), SQLite im WAL-Modus, eine Datei pro Stunde
 - **Frontend:** Svelte 5 + Tailwind, Catppuccin-Mocha-Theme im Hyprland-Look (Frosted Glass, Verlaufskanten, Monospace)
 - **Status:** Prototyp – funktionsfähig und getestet, siehe [Grenzen & nächste Schritte](#grenzen--nächste-schritte)
