@@ -115,6 +115,18 @@ dns_servers = []
 # Erste Verbindung einer Netzgruppe in ein Land, das sie bisher nie kontaktiert hat (braucht GeoIP).
 new_country = true
 
+# Beaconing: regelmäßige Verbindungen eines Hosts zum selben externen Ziel. Nur als info in der Web-UI, nie per Mail.
+beacon = true
+beacon_min_connections = 20
+beacon_min_minutes = 120
+beacon_max_jitter = 0.2
+# Nutzen so viele interne Hosts dasselbe Ziel, gilt es als normaler Dienst.
+beacon_max_hosts = 10
+# Ausnahmen: interne Hosts oder externe Ziele (IP oder Netz), Anbieter (ASN, z. B. 8075 Microsoft) und Zielports.
+beacon_allow = []
+beacon_allow_asn = []
+beacon_allow_ports = [123]
+
 # Isolation Forest als zweite Meinung: täglich neu trainiert mit den Merkmalen der letzten ml_training_days Tage
 # (ohne IP-Adressen). Gemeldet ab ml_threshold, mindestens aber ab dem 99,9-%-Quantil der Trainingsdaten.
 ml = true

@@ -26,7 +26,7 @@ seinem eigenen. Dazu kommen feste Regeln und ein Isolation Forest als zweite Mei
 | **Aufbewahrung** | live 48 h (höchstens 72 h) → Historie bis 50 GB → zstd-Archiv, gelöscht 90 Tage nach dem jüngsten Flow; siehe [Aufbewahrung](#aufbewahrung-live--historie--archiv). PCAP-Analysen folgen dem Live-Fenster, die hochgeladene Datei selbst wird direkt nach der Analyse gelöscht |
 | **Ausgenommene Netze** | `network.exclude_networks`: Verkehr von oder zu diesen Netzen wird beim Empfang verworfen – nicht gespeichert, nicht angezeigt, nicht gezählt |
 | **Upload-Alarm** | lädt eine Verbindung mehr als 1 GiB nach extern hoch, geht eine Mail an die Admins (Quelle, Ziel mit Land/ASN, Dienst, Menge, Dauer, Rate) |
-| **Anomalien** (`#anomalies`) | Statistik gegen eine Baseline je Netzgruppe und Host, Portscan, DNS an externe Resolver, erstes Land einer Gruppe, Netz-Regeln zwischen Zonen, Isolation Forest als zweite Meinung. Status der Lernphase und des Modells, Verlauf der Auffälligkeiten (30 Tage) mit Filter, Klick auf den Host öffnet die Flow-Suche. Siehe [Anomalie-Erkennung](#anomalie-erkennung) |
+| **Anomalien** (`#anomalies`) | Statistik gegen eine Baseline je Netzgruppe und Host, Portscan, DNS an externe Resolver, erstes Land einer Gruppe, Netz-Regeln zwischen Zonen, Isolation Forest als zweite Meinung. Status der Lernphase und des Modells, **Zeitleiste** (aktive Auffälligkeiten je Stunde bzw. Tag nach Schwere, Klick auf einen Balken filtert die Liste), Verlauf der Auffälligkeiten (30 Tage) mit Filter, Klick auf den Host öffnet die Flow-Suche. Siehe [Anomalie-Erkennung](#anomalie-erkennung) |
 
 Tastatur wie in Hyprland: **Alt+1 … Alt+5** wechselt den Workspace. Der Fokus folgt der Maus: Das Fenster unter dem Zeiger
 bekommt die aktive Verlaufskante.
@@ -166,6 +166,11 @@ Score-Verteilung steht in der Web-UI und hilft beim Einstellen.
 
 **Zusammenfassen:** Tritt dieselbe Art beim selben Host innerhalb einer Stunde erneut auf, wird die bestehende Zeile
 verlängert („3×“) statt eine neue anzulegen. Die stärkste Messung bestimmt den Text.
+
+**Zeitleiste:** Über der Liste zeigt ein Balkendiagramm, wie viele Auffälligkeiten je Abschnitt aktiv waren (24 h: je
+Stunde, 7 Tage: je 6 Stunden, 30 Tage: je Tag), gestapelt nach Schwere. Eine zusammengefasste Zeile zählt in jedem
+Abschnitt, den sie überdeckt. Ein Klick auf einen Balken zeigt in der Liste nur diesen Abschnitt, ein zweiter Klick hebt
+die Auswahl auf. Die Filter für Art, Schwere und Host gelten auch für die Zeitleiste.
 
 **Mails** sind zunächst aus. Mit `mail = true` gehen neue Auffälligkeiten ab `mail_min_severity` (Standard `high`) an die
 Admins aus `[email]`, begrenzt durch `alerts.max_mails_per_hour`. Erst einschalten, wenn die Schwellen zum eigenen Netz
@@ -665,6 +670,7 @@ Snia-Net-Mon ist für den Netzbetrieb gedacht, nicht zur Überwachung einzelner 
 | GET | `/api/stats/sankey` | Knoten/Kanten Quelle → Dienst → Ziel, `limit` = Anzahl Verbindungen |
 | WS | `/api/live` | beim Verbinden `{"type":"history"}`, danach jede Sekunde `{"type":"tick"}` mit Rate (gesamt, `bytes_in`, `bytes_out`), aktiven Verbindungen inkl. Richtung, Zählern und GeoIP |
 | GET | `/api/anomalies` | Auffälligkeiten, neueste zuerst. Parameter: `from`, `to` (Unix-ms), `kind` (`stat`, `ml`, `scan`, `dns`, `country`, `policy`), `host`, `severity` (Mindestschwere `info`/`warn`/`high`), `limit` (≤ 5000) |
+| GET | `/api/anomalies/timeline` | Zeitleiste: je Abschnitt die darin aktiven Auffälligkeiten nach Schwere (`[{ts, info, warn, high}]`). Parameter: `from`, `to`, `bucket` (Länge eines Abschnitts in ms, Standard 1 h, höchstens 500 Abschnitte) sowie dieselben Filter wie `/api/anomalies` |
 | GET | `/api/anomalies/status` | Lernphase, Anzahl Gruppen und Host-Profile, letztes Fenster, Isolation Forest (Training, Schwelle, Score-Quantile), Zähler der letzten 24 h |
 | GET | `/api/archives` | Historie (Größe, Zeitraum, `compressing`) und Archive mit `state` (`packed`, `unpacking`, `ready`, `failed`) |
 | POST | `/api/archives/{name}/open` | Archiv öffnen (`index.db` im Hintergrund entpacken), danach mit `source=archive:{name}` abfragbar; Stundendateien entpackt die jeweilige Abfrage |
