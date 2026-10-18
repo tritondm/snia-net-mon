@@ -121,6 +121,7 @@ beacon_min_connections = 20
 beacon_min_minutes = 120
 beacon_max_jitter = 0.2
 # Zeigen so viele interne Hosts das Muster zum selben Anbieter (ASN) und Port, gilt es als ausgerollte Software.
+# Höherer Wert = MEHR Meldungen. Gegen harmlose Treffer besser beacon_allow_asn nutzen (Liste in FEATURES_de.md).
 beacon_max_hosts = 3
 # Ausnahmen: interne Hosts oder externe Ziele (IP oder Netz), Anbieter (ASN, z. B. 8075 Microsoft) und Zielports.
 beacon_allow = []

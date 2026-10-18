@@ -538,6 +538,11 @@ F(\text{anbieter}, \text{port}, \text{proto}) = \left|\{\, \text{interne Hosts m
 Gemeldet wird nur, wenn `F < beacon_max_hosts` (Standard 3). Für `F` zählen auch Paare, die im aktuellen Fenster keine
 neuen Verbindungen hatten. Ein einzelner Rechner mit eigenem Muster bleibt so sichtbar, die Virenschutz-Flotte nicht.
 
+**Achtung, der Name täuscht:** `beacon_max_hosts` heißt nicht „bis zu so vielen Hosts erlaubt“, sondern „ab so vielen
+Hosts gilt das Muster als normal“. Ein **höherer** Wert ergibt **mehr** Meldungen, ein niedrigerer weniger. Gezählt
+werden nur Hosts, die das Muster *gleichzeitig* zeigen; in kleinen Netzen kommt die Flotten-Prüfung deshalb selten zum
+Zug. Gegen viele harmlose Treffer helfen die Ausnahmen unten besser als ein anderer Wert.
+
 Die Meldung nennt Ziel samt Land und Anbieter, Anzahl der Verbindungen, Intervall, Streuung, typische Größe und Dauer:
 
 ```text
@@ -545,8 +550,34 @@ Die Meldung nennt Ziel samt Land und Anbieter, Anzahl der Verbindungen, Interval
 ```
 
 Beaconing ist immer nur **info** und geht **nie per Mail** raus: ein Hinweis zum Nachsehen, kein Alarm. Solange das Muster
-anhält, wird dieselbe Zeile verlängert. Häufige harmlose Treffer gehören als Ausnahme in die Konfiguration, z. B.
-`beacon_allow_asn = [8075]` für Microsoft.
+anhält, wird dieselbe Zeile verlängert. Häufige harmlose Treffer gehören als Ausnahme in die Konfiguration.
+
+#### Häufige harmlose Anbieter
+
+Diese Anbieter erzeugen in fast jedem Netz regelmäßige Verbindungen: Push-Dienste von Handys und Tablets, Updates,
+Keepalives von Apps, Inhalte über CDNs. Die ASN-Nummer steht in den Details einer Meldung (Feld `asn` in der API).
+
+| ASN | Anbieter | typische Ursache | Abwägung |
+|---|---|---|---|
+| 714 | Apple | Apple-Push-Dienst (Port 5223), iCloud | unkritisch, Apple hostet keine fremden Server |
+| 15169 | Google | Android-Push, Chrome, Google-Dienste (Port 443) | unkritisch; Google Cloud (Kunden-VMs) ist AS396982 und bleibt sichtbar |
+| 8075 | Microsoft | Windows, Office 365, Teams, Defender | Vorsicht: enthält auch Azure, also Server, die jeder mieten kann |
+| 20940 | Akamai | CDN, Software-Updates | weitgehend unkritisch; Linode (Akamais Cloud) ist AS63949 |
+| 54113 | Fastly | CDN | weitgehend unkritisch |
+| 13335 | Cloudflare | CDN und Proxy für sehr viele Websites | Vorsicht: Schadsoftware versteckt ihren Steuerserver gern hinter Cloudflare |
+| 32934 | Meta | WhatsApp, Instagram, Facebook | unkritisch |
+
+```toml
+[anomaly]
+beacon_allow_asn = [714, 15169, 20940, 54113]   # Apple, Google, Akamai, Fastly – je nach Netz ergänzen
+```
+
+**Nicht freigeben** sollte man Hoster und Clouds, bei denen jeder einen Server mieten kann: Amazon AWS (16509), Google
+Cloud (396982), DigitalOcean (14061), Hetzner (24940), OVH (16276), netcup (197540), Linode (63949) und ähnliche. Genau
+dort laufen Steuerserver von Schadsoftware. Ist ein bestimmter Server dort bekannt und harmlos (eigene Nextcloud,
+Schulsoftware), gehört **nur seine IP** in `beacon_allow`, nicht der ganze Anbieter. Dasselbe gilt für Ziele, die nur
+im eigenen Netz vorkommen, etwa die Telefonanlage (SIP über TLS, Port 5061) oder eine Verwaltungssoftware beim
+regionalen Hoster: erst klären, dann die IP freigeben.
 
 ### Netz-Regeln
 
@@ -717,7 +748,7 @@ Nach der Lernphase lohnt ein Blick auf die Liste der ersten Tage. Typische Fäll
 | Viele Statistik-Treffer mit kleinen Mengen | Mindestwerte (`min_upload_mb`, `min_flows` …) erhöhen |
 | Viele Statistik-Treffer mit großen Faktoren, aber harmlos | `z_threshold` erhöhen (5 ≈ Faktor 12, 6 ≈ Faktor 20 bei σ̂ = 0,5) |
 | Viele „ungewöhnliches gesamtmuster“ | `ml_threshold` über das 99,9-%-Quantil aus der Statuskarte setzen oder `ml = false` |
-| Beaconing zu bekannter Software | Anbieter in `beacon_allow_asn`, Ziel in `beacon_allow` oder `beacon_max_hosts` senken |
+| Beaconing zu bekannter Software | Anbieter in `beacon_allow_asn` ([Liste](#häufige-harmlose-anbieter)), einzelne Ziele in `beacon_allow`; `beacon_max_hosts` **senken**, nicht erhöhen |
 | Externes DNS von einem erlaubten Resolver | Resolver in `dns_servers` |
 | Netz-Regel schlägt bei einem erlaubten Dienst an | `allow`-Regel mit `ports` **vor** die meldende Regel |
 

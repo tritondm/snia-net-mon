@@ -539,6 +539,11 @@ F(\text{provider}, \text{port}, \text{proto}) = \left|\{\, \text{internal hosts 
 A report is only made if `F < beacon_max_hosts` (default 3). Pairs without new connections in the current window also
 count towards `F`. A single machine with its own pattern thus stays visible, the antivirus fleet does not.
 
+**Careful, the name is misleading:** `beacon_max_hosts` does not mean "up to this many hosts allowed" but "from this many
+hosts on, the pattern counts as normal". A **higher** value gives **more** reports, a lower one fewer. Only hosts showing
+the pattern *at the same time* are counted, so in small networks the fleet check rarely kicks in. Against many harmless
+hits the exceptions below work better than a different value.
+
 The report names the destination with country and provider, number of connections, interval, spread, typical size and
 duration:
 
@@ -549,8 +554,34 @@ duration:
 (beaconing to …: 132 connections, every 5.0 min ± 3 %, ~1.2 KiB each, for 11 h)
 
 Beaconing is always just **info** and is **never sent by mail**: a hint to take a look, not an alarm. As long as the
-pattern continues, the same row is extended. Frequent harmless hits belong in the configuration as exceptions, e.g.
-`beacon_allow_asn = [8075]` for Microsoft.
+pattern continues, the same row is extended. Frequent harmless hits belong in the configuration as exceptions.
+
+#### Common harmless providers
+
+These providers cause regular connections in almost every network: push services of phones and tablets, updates, app
+keepalives, content via CDNs. The ASN is shown in the details of a finding (field `asn` in the API).
+
+| ASN | Provider | Typical cause | Trade-off |
+|---|---|---|---|
+| 714 | Apple | Apple Push Notification service (port 5223), iCloud | uncritical, Apple does not host third-party servers |
+| 15169 | Google | Android push, Chrome, Google services (port 443) | uncritical; Google Cloud (customer VMs) is AS396982 and stays visible |
+| 8075 | Microsoft | Windows, Office 365, Teams, Defender | careful: also contains Azure, i.e. servers anyone can rent |
+| 20940 | Akamai | CDN, software updates | largely uncritical; Linode (Akamai's cloud) is AS63949 |
+| 54113 | Fastly | CDN | largely uncritical |
+| 13335 | Cloudflare | CDN and proxy for a huge number of websites | careful: malware likes to hide its command server behind Cloudflare |
+| 32934 | Meta | WhatsApp, Instagram, Facebook | uncritical |
+
+```toml
+[anomaly]
+beacon_allow_asn = [714, 15169, 20940, 54113]   # Apple, Google, Akamai, Fastly – extend as fits your network
+```
+
+**Do not allow** hosters and clouds where anyone can rent a server: Amazon AWS (16509), Google Cloud (396982),
+DigitalOcean (14061), Hetzner (24940), OVH (16276), netcup (197540), Linode (63949) and similar. That is exactly where
+malware command servers run. If a specific server there is known and harmless (your own Nextcloud, school software),
+put **only its IP** into `beacon_allow`, not the whole provider. The same goes for destinations specific to your own
+network, such as the phone system (SIP over TLS, port 5061) or administration software at a regional hoster: clarify
+first, then allow the IP.
 
 ### Network rules
 
@@ -724,7 +755,7 @@ After the learning phase it is worth looking at the list of the first few days. 
 | Many statistics hits with small volumes | raise the minimums (`min_upload_mb`, `min_flows` …) |
 | Many statistics hits with large factors that are harmless | raise `z_threshold` (5 ≈ factor 12, 6 ≈ factor 20 at σ̂ = 0.5) |
 | Many "ungewöhnliches gesamtmuster" (unusual overall pattern) | set `ml_threshold` above the 99.9 % quantile from the status card, or `ml = false` |
-| Beaconing to known software | provider in `beacon_allow_asn`, destination in `beacon_allow`, or lower `beacon_max_hosts` |
+| Beaconing to known software | provider in `beacon_allow_asn` ([list](#common-harmless-providers)), single destinations in `beacon_allow`; **lower** `beacon_max_hosts`, do not raise it |
 | External DNS from a permitted resolver | resolver in `dns_servers` |
 | A network rule fires for a permitted service | `allow` rule with `ports` **before** the reporting rule |
 
