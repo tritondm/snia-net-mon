@@ -112,6 +112,9 @@ scan_threshold = 100
 # DNS (Port 53/853) an externe Resolver statt an den eigenen melden; erlaubte externe Resolver in dns_servers.
 dns_rule = true
 dns_servers = []
+# Interne Hosts oder Netze, die selbst extern auflösen dürfen: eigene DNS-Server, Domain-Controller, Router/Firewalls
+# mit DNS-Weiterleitung. Alle anderen Erkennungen bleiben für sie aktiv (anders als bei ignore).
+dns_clients = []
 # Erste Verbindung einer Netzgruppe in ein Land, das sie bisher nie kontaktiert hat (braucht GeoIP).
 new_country = true
 

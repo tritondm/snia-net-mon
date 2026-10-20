@@ -316,6 +316,7 @@ dynamic_networks = ["10.20.0.0/22"]          # Schüler-WLAN
 groups = ["10.0.10.0/28"]                    # Server-VLAN als eigene Gruppe (sonst /24)
 ignore = ["10.0.10.5"]                       # Backup-Server, große Uploads sind normal
 dns_servers = []                             # externe Resolver, die erlaubt sind
+dns_clients = []                             # interne Hosts, die extern auflösen dürfen (eigene DNS-Server, Router)
 ```
 
 ### 2. Isolation Forest
@@ -457,7 +458,8 @@ vertikaler (ein Host, viele Ports) gleich. Ein Programm, das einen ausgefallenen
 aus. Die Meldung nennt Versuche, Hosts, Ports und einen Auszug der Ziele. Schwere **hoch**.
 
 **Externes DNS.** TCP oder UDP an Port 53 (DNS) oder 853 (DNS over TLS), Richtung `out`, an einen Resolver, der nicht in
-`dns_servers` steht. Geräte, die den Schul- oder Firmen-DNS umgehen, umgehen oft auch dessen Filter; manche Schadsoftware
+`dns_servers` steht und nicht von einem Host aus `dns_clients` kommt (eigene DNS-Server und Router lösen ja selbst
+extern auf). Geräte, die den Schul- oder Firmen-DNS umgehen, umgehen oft auch dessen Filter; manche Schadsoftware
 nutzt eigene Resolver. DNS over HTTPS (Port 443) ist so nicht erkennbar. Schwere **warnung**.
 
 **Neues Land.** Je Netzgruppe merkt sich `anomaly.db` die Menge `C_g` aller Länder, in die jemals hochgeladen wurde
@@ -750,6 +752,7 @@ Nach der Lernphase lohnt ein Blick auf die Liste der ersten Tage. Typische Fäll
 | Viele „ungewöhnliches gesamtmuster“ | `ml_threshold` über das 99,9-%-Quantil aus der Statuskarte setzen oder `ml = false` |
 | Beaconing zu bekannter Software | Anbieter in `beacon_allow_asn` ([Liste](#häufige-harmlose-anbieter)), einzelne Ziele in `beacon_allow`; `beacon_max_hosts` **senken**, nicht erhöhen |
 | Externes DNS von einem erlaubten Resolver | Resolver in `dns_servers` |
+| Externes DNS vom eigenen DNS-Server oder Router | Host in `dns_clients` |
 | Netz-Regel schlägt bei einem erlaubten Dienst an | `allow`-Regel mit `ports` **vor** die meldende Regel |
 
 ## Architektur

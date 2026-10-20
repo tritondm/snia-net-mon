@@ -319,6 +319,7 @@ dynamic_networks = ["10.20.0.0/22"]          # student WLAN
 groups = ["10.0.10.0/28"]                    # server VLAN as its own group (otherwise /24)
 ignore = ["10.0.10.5"]                       # backup server, large uploads are normal
 dns_servers = []                             # permitted external resolvers
+dns_clients = []                             # internal hosts allowed to resolve externally (own DNS servers, routers)
 ```
 
 ### 2. Isolation Forest
@@ -459,7 +460,8 @@ host, many ports) therefore count the same. A program that keeps retrying a serv
 anything. The report lists attempts, hosts, ports and a sample of the targets. Severity **high**.
 
 **External DNS.** TCP or UDP to port 53 (DNS) or 853 (DNS over TLS), direction `out`, to a resolver not listed in
-`dns_servers`. Devices that bypass the school's or company's DNS often bypass its filters too; some malware uses its own
+`dns_servers`, from a host not listed in `dns_clients` (your own DNS servers and routers resolve externally
+themselves). Devices that bypass the school's or company's DNS often bypass its filters too; some malware uses its own
 resolvers. DNS over HTTPS (port 443) cannot be detected this way. Severity **warn**.
 
 **New country.** Per network group, `anomaly.db` remembers the set `C_g` of all countries ever uploaded to (countries of
@@ -757,6 +759,7 @@ After the learning phase it is worth looking at the list of the first few days. 
 | Many "ungewöhnliches gesamtmuster" (unusual overall pattern) | set `ml_threshold` above the 99.9 % quantile from the status card, or `ml = false` |
 | Beaconing to known software | provider in `beacon_allow_asn` ([list](#common-harmless-providers)), single destinations in `beacon_allow`; **lower** `beacon_max_hosts`, do not raise it |
 | External DNS from a permitted resolver | resolver in `dns_servers` |
+| External DNS from your own DNS server or router | host in `dns_clients` |
 | A network rule fires for a permitted service | `allow` rule with `ports` **before** the reporting rule |
 
 ## Architecture

@@ -88,6 +88,8 @@ pub struct AnomalyConfig {
     pub ignore: LocalNetworks,
     /// Erlaubte externe DNS-Resolver
     pub dns_servers: LocalNetworks,
+    /// Interne Hosts, die extern auflösen dürfen (eigene DNS-Server, Router)
+    pub dns_clients: LocalNetworks,
     pub dns_rule: bool,
     /// Fehlgeschlagene Verbindungsversuche je Fenster, ab denen ein Portscan gemeldet wird; 0 = aus
     pub scan_threshold: usize,
@@ -125,6 +127,7 @@ impl Default for AnomalyConfig {
             dynamic_networks: LocalNetworks::none(),
             ignore: LocalNetworks::none(),
             dns_servers: LocalNetworks::none(),
+            dns_clients: LocalNetworks::none(),
             dns_rule: true,
             scan_threshold: 100,
             new_country: true,
@@ -198,6 +201,7 @@ pub fn spawn(
         let filters = Filters {
             ignore: config.ignore.clone(),
             dns_servers: config.dns_servers.clone(),
+            dns_clients: config.dns_clients.clone(),
             policy: config.policy.clone(),
             beacon: config.beacon.clone(),
         };

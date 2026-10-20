@@ -165,6 +165,7 @@ A single file: `cp config.example.toml config.toml`. All keys are commented ther
 | `anomaly.ignore` | empty | hosts that are not evaluated |
 | `anomaly.scan_threshold` | `100` | port scan from this many failed attempts per window, `0` = off |
 | `anomaly.dns_rule` / `dns_servers` | `true` / empty | report DNS to external resolvers / permitted external resolvers |
+| `anomaly.dns_clients` | empty | internal hosts allowed to resolve externally (own DNS servers, routers) |
 | `anomaly.new_country` | `true` | report the first country of a network group |
 | `anomaly.beacon` | `true` | beaconing detection (only a hint in the web UI, never by mail) |
 | `anomaly.beacon_min_connections` / `beacon_min_minutes` / `beacon_max_jitter` | `20` / `120` / `0.2` | pattern from this many connections over this many minutes with at most this relative spread of the intervals |

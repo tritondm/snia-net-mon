@@ -78,6 +78,7 @@ impl HostWindow {
 pub struct Filters {
     pub ignore: LocalNetworks,
     pub dns_servers: LocalNetworks,
+    pub dns_clients: LocalNetworks,
     pub policy: crate::policy::Policy,
     pub beacon: BeaconConfig,
 }
@@ -85,7 +86,7 @@ pub struct Filters {
 impl Default for Filters {
     /// Keine Ausnahmen (`LocalNetworks::default()` wären die privaten Netze).
     fn default() -> Self {
-        Self { ignore: LocalNetworks::none(), dns_servers: LocalNetworks::none(), policy: Default::default(), beacon: BeaconConfig::default() }
+        Self { ignore: LocalNetworks::none(), dns_servers: LocalNetworks::none(), dns_clients: LocalNetworks::none(), policy: Default::default(), beacon: BeaconConfig::default() }
     }
 }
 
@@ -164,7 +165,7 @@ impl Window {
         if h.ext_peers.len() < SET_CAP {
             h.ext_peers.insert(peer);
         }
-        if matches!(flow.proto, 6 | 17) && matches!(flow.dst_port, 53 | 853) && !filters.dns_servers.contains(peer) {
+        if matches!(flow.proto, 6 | 17) && matches!(flow.dst_port, 53 | 853) && !filters.dns_servers.contains(peer) && !filters.dns_clients.contains(host) {
             *h.dns.entry(peer).or_default() += 1;
         }
         let info = self.peers.entry(peer).or_insert_with(|| {
@@ -242,6 +243,17 @@ mod tests {
         // Beaconing: ausgehende Anfragen (443, 22, 53, 53), nicht der ignorierte Host
         assert_eq!(w.beacons.len(), 4);
         assert!(w.beacons.contains_key(&("192.168.1.10".parse().unwrap(), "203.0.113.5".parse().unwrap(), 443, 6)));
+    }
+
+    #[test]
+    fn dns_clients_may_resolve_externally() {
+        let filters = Filters { dns_clients: LocalNetworks::parse(&["192.168.1.53"]).unwrap(), ..Default::default() };
+        let geo = GeoLookup::disabled();
+        let mut w = Window::new(0, false);
+        w.add(&flow("192.168.1.53", "198.41.0.4", 50000, 53, 80, 0, Direction::Out), &filters, &geo);
+        w.add(&flow("192.168.1.10", "8.8.8.8", 50000, 53, 80, 0, Direction::Out), &filters, &geo);
+        assert!(w.hosts[&"192.168.1.53".parse().unwrap()].dns.is_empty(), "eigener DNS-Server darf extern auflösen");
+        assert_eq!(w.hosts[&"192.168.1.10".parse().unwrap()].dns.len(), 1);
     }
 
     #[test]
