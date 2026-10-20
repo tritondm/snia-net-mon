@@ -68,7 +68,7 @@
       [status, timeline, rows] = await Promise.all([
         api('/anomalies/status'),
         api('/anomalies/timeline', { query: { ...query, from: timelineStart(r), bucket: r[3] } }),
-        api('/anomalies', { query: { ...query, from: slot?.from ?? Date.now() - r[2], to: slot?.to, limit: 1000 } }),
+        api('/anomalies', { query: { ...query, from: slot?.from ?? timelineStart(r), to: slot?.to, limit: 1000 } }),
       ]);
       error = '';
       disabled = false;
@@ -114,6 +114,14 @@
   const bucketMs = () => range()[3];
   function pick(b) {
     slot = slot?.from === b.ts ? null : { from: b.ts, to: b.ts + bucketMs() - 1 };
+  }
+  /** Zeitraum einer zusammengefassten Auffälligkeit: erstes bis letztes Fenster (am selben Tag nur mit Uhrzeit). */
+  function fmtSpan(r) {
+    if (r.last_ts - r.ts < 60_000) return fmtDate(r.ts);
+    const a = new Date(r.ts);
+    const b = new Date(r.last_ts);
+    if (a.toDateString() === b.toDateString()) return `${fmtDate(r.ts)}–${b.toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+    return `${fmtDate(r.ts)} – ${fmtDate(r.last_ts)}`;
   }
   const fmtInterval = (s) => (s >= 90 ? `${(s / 60).toFixed(1)} min` : `${Math.round(s)} s`);
   const fmtTypical = (f) => (f.bytes ? fmtBytes(f.typical) : f.percent ? `${Math.round(f.typical * 100)} %` : fmtNum(f.typical));
@@ -258,7 +266,7 @@
             <tr class="cursor-pointer" onclick={() => (open = open === r.id ? null : r.id)}>
               <td title={SEVERITY[r.severity]?.[1]}><span class="led {SEVERITY[r.severity]?.[0]}"></span></td>
               <td class="tabular-nums text-ctp-subtext0" title="erstes bis letztes fenster">
-                {fmtDate(r.ts)}{#if r.count > 1}<span class="text-ctp-overlay0"> · {r.count}×</span>{/if}
+                {fmtSpan(r)}{#if r.count > 1}<span class="text-ctp-overlay0"> · {r.count}×</span>{/if}
               </td>
               <td><span class="chip !py-0 {kind.color}" title={kind.title}>{kind.label}</span></td>
               <td>
