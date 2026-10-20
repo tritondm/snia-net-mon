@@ -133,7 +133,7 @@
       >{:else}{seg.text}{/if}{/each}
 {/snippet}
 
-<div class="grid gap-2.5">
+<div class="grid grid-cols-1 gap-2.5">
   {#if disabled}
     <Window title="Anomalie-Erkennung">
       <div class="py-8 text-center text-ctp-overlay1">abgeschaltet – in config.toml unter <span class="text-ctp-text">[anomaly]</span> enabled = true setzen</div>
@@ -206,8 +206,8 @@
         <span class="chip"><span class="led bg-ctp-yellow"></span>warnung</span>
         <span class="chip"><span class="led bg-ctp-overlay0"></span>info</span>
       {/snippet}
-      <div bind:clientWidth={tlWidth} class="w-full">
-        <svg width={tlWidth} height={TL_H} class="block select-none" role="img" aria-label="Zeitleiste der Auffälligkeiten">
+      <div bind:clientWidth={tlWidth} class="w-full min-w-0 overflow-hidden">
+        <svg width="100%" height={TL_H} class="block select-none" role="img" aria-label="Zeitleiste der Auffälligkeiten">
           {#each tlTicks as n}
             {@const y = TL_H - TL_PAD.b - tlY(n)}
             <line x1={TL_PAD.l} x2={tlWidth - TL_PAD.r} y1={y} y2={y} class="stroke-ctp-surface0" stroke-dasharray="2 4" />
@@ -273,7 +273,7 @@
                 <button class="text-ctp-teal hover:underline" title="in der flow-suche öffnen" onclick={(e) => (e.stopPropagation(), searchFor({ ip: r.host }))}>{r.host}</button>
               </td>
               <td class="text-ctp-overlay1">{r.group}</td>
-              <td class="whitespace-normal text-ctp-text">
+              <td class="whitespace-normal text-ctp-text [overflow-wrap:anywhere]">
                 {#if r.kind === 'country'}<span class="mr-1">{flag(r.detail?.cc)}</span>{/if}{#if r.kind === 'beacon'}{r.title}{:else}{@render ipText(r.title, r.geo)}{/if}
                 {#if r.kind === 'stat' && r.detail?.ml_score != null}
                   <span
@@ -286,7 +286,7 @@
             {#if open === r.id}
               <tr class="!bg-ctp-mantle/50">
                 <td></td>
-                <td colspan="5" class="whitespace-normal text-[11px] text-ctp-subtext0">
+                <td colspan="5" class="whitespace-normal text-[11px] [overflow-wrap:anywhere] text-ctp-subtext0">
                   {#if r.kind === 'stat'}
                     <div class="mb-1 text-ctp-overlay1">verglichen mit: {r.detail.slot ?? '–'}</div>
                     <div class="flex flex-wrap gap-2">
