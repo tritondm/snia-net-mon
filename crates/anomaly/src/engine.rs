@@ -19,6 +19,8 @@ const DAY_MS: i64 = 24 * HOUR_MS;
 const MERGE_GAP_MS: i64 = HOUR_MS;
 /// So viele Vektoren je Fenster (zufällig gewählt) werden fürs Training aufgehoben.
 const VECTORS_PER_WINDOW: usize = 100;
+/// So viele Ziel-IPs speichert eine Meldung (Portscan, Netz-Regel) als Auszug
+const SAMPLE_IPS: usize = 50;
 /// Mindestzahl an Trainingsvektoren für den Isolation Forest.
 pub const MIN_TRAIN: usize = 1000;
 
@@ -501,7 +503,7 @@ fn scan_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
     ports.sort_unstable();
     let mut sample_hosts: Vec<String> = hosts.iter().map(IpAddr::to_string).collect();
     sample_hosts.sort();
-    sample_hosts.truncate(10);
+    sample_hosts.truncate(SAMPLE_IPS);
     let attempts = h.probes.len();
     Event {
         ts,
@@ -570,7 +572,7 @@ fn policy_event(ts: i64, host: &str, group: &str, rule: &crate::policy::Rule, hi
             "flows": hit.flows,
             "bytes": hit.bytes,
             "peers": hit.peers.len(),
-            "sample_peers": peers.iter().take(20).collect::<Vec<_>>(),
+            "sample_peers": peers.iter().take(SAMPLE_IPS).collect::<Vec<_>>(),
             "ports": ports.iter().take(50).collect::<Vec<_>>(),
         }),
     }

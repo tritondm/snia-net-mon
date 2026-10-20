@@ -133,6 +133,14 @@
       >{:else}{seg.text}{/if}{/each}
 {/snippet}
 
+<!-- IP-Liste untereinander, so viele Spalten wie die Fensterbreite zulässt -->
+{#snippet ipList(label, ips, geo)}
+  <div class="mt-1 text-ctp-overlay1">{label}:</div>
+  <div class="mt-0.5 grid grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] gap-x-4 tabular-nums">
+    {#each ips ?? [] as ip}<div class="truncate" title={ip}>{@render ipText(ip, geo)}</div>{/each}
+  </div>
+{/snippet}
+
 <div class="grid grid-cols-1 gap-2.5">
   {#if disabled}
     <Window title="Anomalie-Erkennung">
@@ -306,7 +314,7 @@
                   {:else if r.kind === 'scan'}
                     <div>{r.detail.attempts} versuche · {r.detail.hosts} ziel-hosts · {r.detail.ports} ports</div>
                     <div class="mt-1 text-ctp-overlay1">ports: {(r.detail.sample_ports ?? []).join(', ')}</div>
-                    <div class="mt-1 text-ctp-overlay1">ziele (auszug): {@render ipText((r.detail.sample_hosts ?? []).join(', '), r.geo)}</div>
+                    {@render ipList(r.detail.hosts > (r.detail.sample_hosts?.length ?? 0) ? 'ziele (auszug)' : 'ziele', r.detail.sample_hosts, r.geo)}
                   {:else if r.kind === 'dns'}
                     <div class="flex flex-wrap gap-2">
                       {#each r.detail.resolvers ?? [] as res}<span class="chip">{@render ipText(res.ip, r.geo)} · {res.flows} flows</span>{/each}
@@ -315,7 +323,7 @@
                   {:else if r.kind === 'policy'}
                     <div>regel <span class="text-ctp-text">{r.detail.rule}</span> ({r.detail.from} → {r.detail.to}) · {r.detail.flows} verbindungen · {fmtBytes(r.detail.bytes)}</div>
                     {#if r.detail.ports?.length}<div class="mt-1 text-ctp-overlay1">ports: {r.detail.ports.join(', ')}</div>{/if}
-                    <div class="mt-1 text-ctp-overlay1">ziele{r.detail.peers > 20 ? ' (auszug)' : ''}: {@render ipText((r.detail.sample_peers ?? []).join(', '), r.geo)}</div>
+                    {@render ipList(r.detail.peers > (r.detail.sample_peers?.length ?? 0) ? 'ziele (auszug)' : 'ziele', r.detail.sample_peers, r.geo)}
                   {:else if r.kind === 'beacon'}
                     <div>
                       ziel <span class="text-ctp-text">{r.detail.peer}:{r.detail.port}/{r.detail.proto}</span>
