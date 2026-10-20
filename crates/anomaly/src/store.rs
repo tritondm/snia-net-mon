@@ -307,11 +307,12 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, ts, last_ts, count, host, grp, kind, severity, score, title, detail FROM events
              WHERE last_ts >= ?1 AND ts <= ?2 AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR host = ?4) AND severity >= ?5
+               AND (?7 IS NULL OR instr(host, ?7) > 0)
              ORDER BY last_ts DESC, id DESC LIMIT ?6",
         )?;
-        let host = f.host.as_deref().map(str::trim).filter(|h| !h.is_empty());
+        let (host, part) = host_filter(f);
         let limit = f.limit.unwrap_or(500).clamp(1, 5000);
-        let rows = stmt.query_map(params![f.from.unwrap_or(0), f.to.unwrap_or(i64::MAX), kind, host, severity, limit], |r| {
+        let rows = stmt.query_map(params![f.from.unwrap_or(0), f.to.unwrap_or(i64::MAX), kind, host, severity, limit, part], |r| {
             let kind: String = r.get(6)?;
             let detail: String = r.get(10)?;
             Ok(EventRow {
@@ -342,12 +343,13 @@ impl Store {
         let mut buckets: Vec<Bucket> = (0..).map(|i| first + i * bucket).take_while(|ts| *ts < to).map(|ts| Bucket { ts, ..Bucket::default() }).collect();
         let kind = f.kind.as_deref().filter(|k| !k.is_empty()).map(|k| Kind::parse(k).map(Kind::name).unwrap_or("?"));
         let severity = f.severity.as_deref().and_then(Severity::parse).unwrap_or(Severity::Info) as i64;
-        let host = f.host.as_deref().map(str::trim).filter(|h| !h.is_empty());
+        let (host, part) = host_filter(f);
         let mut stmt = self.conn.prepare_cached(
             "SELECT ts, last_ts, severity FROM events
-             WHERE last_ts >= ?1 AND ts <= ?2 AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR host = ?4) AND severity >= ?5",
+             WHERE last_ts >= ?1 AND ts <= ?2 AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR host = ?4) AND severity >= ?5
+               AND (?6 IS NULL OR instr(host, ?6) > 0)",
         )?;
-        let rows = stmt.query_map(params![first, to, kind, host, severity], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?;
+        let rows = stmt.query_map(params![first, to, kind, host, severity, part], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?;
         for row in rows {
             let (ts, last_ts, sev) = row?;
             let lo = ((ts.max(first) - first) / bucket) as usize;
@@ -386,6 +388,14 @@ impl Store {
             self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
         }
         Ok((vectors, events))
+    }
+}
+
+/// Host-Filter: eine vollständige IP gilt exakt (10.0.0.1 trifft nicht 10.0.0.10), sonst Teiltreffer ("10.0.0.").
+fn host_filter(f: &EventFilter) -> (Option<&str>, Option<&str>) {
+    match f.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) if h.parse::<std::net::IpAddr>().is_ok() => (Some(h), None),
+        part => (None, part),
     }
 }
 
@@ -443,6 +453,8 @@ mod tests {
         let scans = store.events(&EventFilter { kind: Some("scan".into()), ..Default::default() }).unwrap();
         assert_eq!(scans.len(), 1);
         assert!(store.events(&EventFilter { kind: Some("unsinn".into()), ..Default::default() }).unwrap().is_empty());
+        let host = |h: &str| store.events(&EventFilter { host: Some(h.into()), ..Default::default() }).unwrap().len();
+        assert_eq!((host("10.0.0.5"), host("10.0.0."), host("10.0.0.50"), host("10.0.0.6")), (2, 2, 0, 0));
         let c = store.counts(0).unwrap();
         assert_eq!((c.info, c.warn, c.high), (1, 0, 1));
 

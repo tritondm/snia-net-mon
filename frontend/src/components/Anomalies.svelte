@@ -86,9 +86,10 @@
 
   $effect(() => {
     filter.range, filter.kind, filter.severity, filter.host, slot;
-    load();
+    // kurz warten, damit nicht jeder Tastendruck im Host-Feld eine Abfrage auslöst
+    const first = setTimeout(load, 250);
     const id = setInterval(load, 30_000);
-    return () => clearInterval(id);
+    return () => (clearTimeout(first), clearInterval(id));
   });
 
   const learnedDays = $derived(status ? (Date.now() - status.started_ms) / DAY : 0);
@@ -115,14 +116,32 @@
   function pick(b) {
     slot = slot?.from === b.ts ? null : { from: b.ts, to: b.ts + bucketMs() - 1 };
   }
-  /** Zeitraum einer zusammengefassten Auffälligkeit: erstes bis letztes Fenster (am selben Tag nur mit Uhrzeit). */
-  function fmtSpan(r) {
-    if (r.last_ts - r.ts < 60_000) return fmtDate(r.ts);
-    const a = new Date(r.ts);
-    const b = new Date(r.last_ts);
-    if (a.toDateString() === b.toDateString()) return `${fmtDate(r.ts)}–${b.toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
-    return `${fmtDate(r.ts)} – ${fmtDate(r.last_ts)}`;
+  // Sortierung der Liste per Klick auf die Spaltenköpfe; Standard: zuletzt aktive zuerst
+  let sort = $state({ key: 'last_ts', dir: -1 });
+  const SEV_RANK = { info: 0, warn: 1, high: 2 };
+  /** IPv4 numerisch vergleichbar machen (10.0.0.9 vor 10.0.0.10), IPv6 dahinter als Text. */
+  const ipKey = (ip) => (/^\d+(\.\d+){3}$/.test(ip) ? ip.split('.').map((n) => n.padStart(3, '0')).join('.') : `~${ip}`);
+  const SORT_KEYS = {
+    severity: (r) => SEV_RANK[r.severity] ?? 0,
+    ts: (r) => r.ts,
+    last_ts: (r) => r.last_ts,
+    kind: (r) => (KINDS[r.kind] ?? KINDS.stat).label,
+    host: (r) => ipKey(r.host),
+    group: (r) => r.group,
+  };
+  function cmp(a, b) {
+    return a < b ? -1 : a > b ? 1 : 0;
   }
+  const sorted = $derived.by(() => {
+    const key = SORT_KEYS[sort.key];
+    return [...rows].sort((a, b) => sort.dir * cmp(key(a), key(b)) || b.last_ts - a.last_ts);
+  });
+  function sortBy(key) {
+    // Zeiten und Schwere zuerst absteigend, Texte aufsteigend
+    if (sort.key === key) sort.dir = -sort.dir;
+    else sort = { key, dir: ['ts', 'last_ts', 'severity'].includes(key) ? -1 : 1 };
+  }
+  const hosts = $derived([...new Set(rows.map((r) => r.host))].sort((a, b) => cmp(ipKey(a), ipKey(b))));
   const fmtInterval = (s) => (s >= 90 ? `${(s / 60).toFixed(1)} min` : `${Math.round(s)} s`);
   const fmtTypical = (f) => (f.bytes ? fmtBytes(f.typical) : f.percent ? `${Math.round(f.typical * 100)} %` : fmtNum(f.typical));
 </script>
@@ -264,21 +283,42 @@
           <option value="warn">ab warnung</option>
           <option value="high">nur hoch</option>
         </select>
-        <input class="input !w-36 !py-0.5 text-[11px]" placeholder="host-ip" bind:value={filter.host} />
+        <div class="relative">
+          <input class="input !w-40 !py-0.5 !pr-5 text-[11px]" placeholder="host-ip oder teil davon" list="anomaly-hosts" bind:value={filter.host} />
+          {#if filter.host}<button class="absolute right-1.5 top-1/2 -translate-y-1/2 text-ctp-overlay1 hover:text-ctp-text" title="host-filter aufheben" onclick={() => (filter.host = '')}>✕</button>{/if}
+          <datalist id="anomaly-hosts">{#each hosts as h}<option value={h}></option>{/each}</datalist>
+        </div>
       {/snippet}
       <table class="table-flows">
-        <thead><tr><th></th><th>Zeit</th><th>Art</th><th>Host</th><th>Gruppe</th><th class="w-full">Befund</th></tr></thead>
+        <thead>
+          <tr>
+            {#each [['severity', ''], ['ts', 'Beginn'], ['last_ts', 'Zuletzt'], ['kind', 'Art'], ['host', 'Host'], ['group', 'Gruppe']] as [key, label]}
+              <th>
+                <button class="uppercase tracking-wider hover:text-ctp-text {sort.key === key ? 'text-ctp-teal' : ''}" title="sortieren" onclick={() => sortBy(key)}
+                  >{label || '●'}{sort.key === key ? (sort.dir < 0 ? ' ↓' : ' ↑') : ''}</button
+                >
+              </th>
+            {/each}
+            <th class="w-full">Befund</th>
+          </tr>
+        </thead>
         <tbody>
-          {#each rows as r (r.id)}
+          {#each sorted as r (r.id)}
             {@const kind = KINDS[r.kind] ?? KINDS.stat}
             <tr class="cursor-pointer" onclick={() => (open = open === r.id ? null : r.id)}>
               <td title={SEVERITY[r.severity]?.[1]}><span class="led {SEVERITY[r.severity]?.[0]}"></span></td>
-              <td class="tabular-nums text-ctp-subtext0" title="erstes bis letztes fenster">
-                {fmtSpan(r)}{#if r.count > 1}<span class="text-ctp-overlay0"> · {r.count}×</span>{/if}
+              <td class="tabular-nums text-ctp-subtext0" title="erstes fenster">{fmtDate(r.ts)}</td>
+              <td class="tabular-nums text-ctp-subtext0" title="letztes fenster">
+                {#if r.count > 1}{fmtDate(r.last_ts)}<span class="text-ctp-overlay0"> · {r.count}×</span>{:else}<span class="text-ctp-overlay0">–</span>{/if}
               </td>
               <td><span class="chip !py-0 {kind.color}" title={kind.title}>{kind.label}</span></td>
               <td>
                 <button class="text-ctp-teal hover:underline" title="in der flow-suche öffnen" onclick={(e) => (e.stopPropagation(), searchFor({ ip: r.host }))}>{r.host}</button>
+                <button
+                  class="ml-1 text-ctp-overlay0 hover:text-ctp-teal"
+                  title="nur auffälligkeiten dieses hosts zeigen"
+                  onclick={(e) => (e.stopPropagation(), (filter.host = filter.host === r.host ? '' : r.host))}>{filter.host === r.host ? '✕' : '⧩'}</button
+                >
               </td>
               <td class="text-ctp-overlay1">{r.group}</td>
               <td class="whitespace-normal text-ctp-text [overflow-wrap:anywhere]">
@@ -294,7 +334,7 @@
             {#if open === r.id}
               <tr class="!bg-ctp-mantle/50">
                 <td></td>
-                <td colspan="5" class="whitespace-normal text-[11px] [overflow-wrap:anywhere] text-ctp-subtext0">
+                <td colspan="6" class="whitespace-normal text-[11px] [overflow-wrap:anywhere] text-ctp-subtext0">
                   {#if r.kind === 'stat'}
                     <div class="mb-1 text-ctp-overlay1">verglichen mit: {r.detail.slot ?? '–'}</div>
                     <div class="flex flex-wrap gap-2">
@@ -349,7 +389,7 @@
             {/if}
           {:else}
             <tr>
-              <td colspan="6" class="py-12 text-center text-ctp-overlay0">
+              <td colspan="7" class="py-12 text-center text-ctp-overlay0">
                 {slot ? 'keine auffälligkeiten in diesem abschnitt' : status?.learning ? 'keine auffälligkeiten – die erkennung lernt noch' : 'keine auffälligkeiten im gewählten zeitraum'}
               </td>
             </tr>
