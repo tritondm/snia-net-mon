@@ -744,8 +744,28 @@ only that period in the list, a second click clears the selection. The filters f
 to the timeline.
 
 **Mails** are off initially. With `mail = true`, **new** anomalies from `mail_min_severity` (default `high`) go to the
-admins from `[email]`, limited by `alerts.max_mails_per_hour`. Extended rows do not trigger another mail, beaconing
-never does. Only enable it once the thresholds fit your network. Every anomaly is also written to the log.
+admins from `[email]`, limited by `alerts.max_mails_per_hour`. Extended rows do not trigger another mail. Only enable
+it once the thresholds fit your network. Every anomaly is also written to the log.
+
+`mail_kinds` gives every kind its own switch: its own minimum severity or `"off"`. Kinds not listed use
+`mail_min_severity`; beaconing stays off unless listed. The web UI shows under "letzte 24 h" which kinds are mailed from
+which severity.
+
+```toml
+mail = true
+mail_min_severity = "high"
+mail_kinds = { dns = "warn", country = "off" }   # external DNS from warn already, new countries never
+```
+
+| Key | Kind | Severity of its reports |
+|---|---|---|
+| `stat` | statistics | warn or high |
+| `ml` | ml | info |
+| `scan` | port scan | high |
+| `dns` | external dns | warn |
+| `country` | new country | info |
+| `policy` | network rule | per rule (`severity`) |
+| `beacon` | beaconing | info |
 
 ### Tuning in practice
 

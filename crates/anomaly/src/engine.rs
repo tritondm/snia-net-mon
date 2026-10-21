@@ -136,6 +136,8 @@ pub struct Status {
     pub ml: MlStatus,
     pub counts_24h: Counts,
     pub mail: bool,
+    /// Mail-Schwelle je Art (Name → info/warn/high), nur Arten, die per Mail gehen
+    pub mail_kinds: std::collections::BTreeMap<&'static str, &'static str>,
     /// Anzahl Netz-Regeln und Zonen
     pub policy_rules: usize,
     pub policy_zones: usize,
@@ -396,6 +398,7 @@ impl Engine {
             },
             counts_24h: self.store.counts(now - DAY_MS)?,
             mail: self.cfg.mail,
+            mail_kinds: Kind::ALL.into_iter().filter_map(|k| Some((k.name(), self.cfg.mail_threshold(k)?.name()))).collect(),
             policy_rules: self.cfg.policy.rules.len(),
             policy_zones: self.cfg.policy.zones,
             beacon: self.cfg.beacon.enabled,

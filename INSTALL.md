@@ -175,6 +175,7 @@ A single file: `cp config.example.toml config.toml`. All keys are commented ther
 | `anomaly.event_retention_days` | `30` | retention of anomalies |
 | `anomaly.timezone` | empty | time zone for weekday/hour, empty = system |
 | `anomaly.mail` / `mail_min_severity` | `false` / `high` | mails to the admins |
+| `anomaly.mail_kinds` | `{}` | switch per kind, e.g. `{ dns = "warn", country = "off" }` |
 | `[[anomaly.zones]]` / `[[anomaly.rules]]` | empty | network rules: named zones and ordered rules, see [network rules](FEATURES.md#network-rules) |
 | `email.smtp_host` / `smtp_port` / `security` | empty / `587` / `starttls` | SMTP server; `security` = `starttls`, `tls` (465) or `none` (LAN relay only). Empty host = no mail |
 | `email.username` / `email.password` | empty | SMTP login; password alternatively via `SNIA_SMTP_PASSWORD` |

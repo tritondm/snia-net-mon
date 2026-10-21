@@ -28,7 +28,7 @@ use engine::Engine;
 use features::{FEATURES, Filters, Window};
 use geo::GeoLookup;
 use model::{FlowRecord, LocalNetworks, fmt_utc, now_ms};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -102,6 +102,8 @@ pub struct AnomalyConfig {
     pub timezone: Option<String>,
     pub mail: bool,
     pub mail_min_severity: Severity,
+    /// Abweichende Mail-Schwelle je Art, `None` = diese Art nie per Mail. Fehlt eine Art, gilt `mail_min_severity`.
+    pub mail_kinds: HashMap<Kind, Option<Severity>>,
     pub max_mails_per_hour: u32,
     /// Netz-Regeln (leer = keine)
     pub policy: policy::Policy,
@@ -138,6 +140,8 @@ impl Default for AnomalyConfig {
             timezone: None,
             mail: false,
             mail_min_severity: Severity::High,
+            // Beaconing ist nur ein Hinweis für die Web-UI
+            mail_kinds: HashMap::from([(Kind::Beacon, None)]),
             max_mails_per_hour: 20,
             policy: policy::Policy::default(),
             beacon: beacon::BeaconConfig::default(),
@@ -180,6 +184,11 @@ pub fn spawn(
     mailer: Option<Mailer>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(Anomaly, tokio::task::JoinHandle<()>), Error> {
+    let mut config = config;
+    if config.mail && mailer.is_none() {
+        tracing::warn!("anomaly.mail = true, aber kein SMTP-Server in [email] – Auffälligkeiten nur in der Web-UI");
+        config.mail = false;
+    }
     let engine = Engine::open(config.clone(), now_ms())?;
     tracing::info!(
         window_min = config.window.as_secs() / 60,
@@ -188,12 +197,9 @@ pub fn spawn(
         ml = config.ml,
         policy_rules = config.policy.rules.len(),
         beacon = config.beacon.enabled,
-        mail = config.mail && mailer.is_some(),
+        mail = config.mail,
         "Anomalie-Erkennung aktiv"
     );
-    if config.mail && mailer.is_none() {
-        tracing::warn!("anomaly.mail = true, aber kein SMTP-Server in [email] – Auffälligkeiten nur in der Web-UI");
-    }
     let handle = Anomaly { engine: Arc::new(Mutex::new(engine)) };
     let engine = handle.engine.clone();
     let task = tokio::spawn(async move {
@@ -279,9 +285,19 @@ fn notify(events: Vec<Event>, config: &AnomalyConfig, mailer: Option<&Mailer>, s
     }
 }
 
-/// Soll diese Auffälligkeit per Mail gemeldet werden? Beaconing ist nur ein Hinweis für die Web-UI und geht nie raus.
+impl AnomalyConfig {
+    /// Ab welcher Schwere eine Art per Mail geht; `None` = gar nicht (auch wenn Mails ganz aus sind).
+    pub fn mail_threshold(&self, kind: Kind) -> Option<Severity> {
+        if !self.mail {
+            return None;
+        }
+        self.mail_kinds.get(&kind).copied().unwrap_or(Some(self.mail_min_severity))
+    }
+}
+
+/// Soll diese Auffälligkeit per Mail gemeldet werden?
 fn wants_mail(e: &Event, config: &AnomalyConfig) -> bool {
-    config.mail && e.kind != Kind::Beacon && e.severity >= config.mail_min_severity
+    config.mail_threshold(e.kind).is_some_and(|min| e.severity >= min)
 }
 
 /// Betreff und Text der Mail zu einer Auffälligkeit.
@@ -314,6 +330,33 @@ pub fn render(e: &Event) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mail_threshold_per_kind() {
+        let config = AnomalyConfig {
+            mail: true,
+            mail_min_severity: Severity::High,
+            mail_kinds: HashMap::from([(Kind::Dns, Some(Severity::Warn)), (Kind::Country, None)]),
+            ..AnomalyConfig::default()
+        };
+        let event = |kind, severity| Event {
+            ts: 0,
+            host: "10.0.1.5".into(),
+            group: "10.0.1.0/24".into(),
+            kind,
+            tag: String::new(),
+            severity,
+            score: 1.0,
+            title: String::new(),
+            detail: serde_json::Value::Null,
+        };
+        assert!(wants_mail(&event(Kind::Dns, Severity::Warn), &config), "eigene Schwelle für dns");
+        assert!(!wants_mail(&event(Kind::Stat, Severity::Warn), &config), "sonst mail_min_severity");
+        assert!(wants_mail(&event(Kind::Stat, Severity::High), &config));
+        assert!(!wants_mail(&event(Kind::Country, Severity::High), &config), "abgeschaltet");
+        // ohne Eintrag für beacon gilt die allgemeine Schwelle (der Standard schaltet beacon ab)
+        assert!(wants_mail(&event(Kind::Beacon, Severity::High), &config));
+    }
 
     #[test]
     fn beaconing_never_goes_out_by_mail() {

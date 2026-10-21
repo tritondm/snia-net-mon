@@ -145,6 +145,11 @@ timezone = ""
 mail = false
 # Mindest-Schwere für Mails: info, warn oder high
 mail_min_severity = "high"
+# Schalter je Art: eigene Mindest-Schwere (info, warn, high) oder "off". Nicht genannte Arten nutzen mail_min_severity,
+# Beaconing ist ohne Eintrag aus. Arten: stat (statistik), ml, scan (portscan), dns (externes dns), country (neues land),
+# policy (netz-regel), beacon (beaconing). Beispiel: externes DNS schon ab warnung, neue Länder nie per Mail:
+# mail_kinds = { dns = "warn", country = "off" }
+mail_kinds = {}
 
 # Netz-Regeln: Zonen benennen und festlegen, welche Verbindungen gemeldet werden. Die Regeln werden der Reihe nach
 # geprüft, die erste passende entscheidet: action = "alert" (Standard) meldet, "allow" erlaubt still. Flows ohne

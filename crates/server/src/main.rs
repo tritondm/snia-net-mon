@@ -173,6 +173,8 @@ struct AnomalySection {
     timezone: String,
     mail: bool,
     mail_min_severity: String,
+    /// Mail-Schwelle je Art, z. B. `{ dns = "warn", country = "off" }`
+    mail_kinds: std::collections::BTreeMap<String, String>,
     /// Netz-Regeln: benannte Zonen und geordnete Regeln (`[[anomaly.zones]]`, `[[anomaly.rules]]`)
     zones: Vec<anomaly::policy::ZoneConfig>,
     rules: Vec<anomaly::policy::RuleConfig>,
@@ -222,6 +224,7 @@ impl Default for AnomalySection {
             timezone: String::new(),
             mail: d.mail,
             mail_min_severity: d.mail_min_severity.name().into(),
+            mail_kinds: Default::default(),
             zones: Vec::new(),
             rules: Vec::new(),
             beacon: d.beacon.enabled,
@@ -237,6 +240,23 @@ impl Default for AnomalySection {
 }
 
 impl AnomalySection {
+    /// `mail_kinds` prüfen; Beaconing bleibt aus, solange es nicht ausdrücklich eingetragen ist.
+    fn mail_kinds(&self) -> Result<std::collections::HashMap<anomaly::Kind, Option<anomaly::Severity>>> {
+        let mut kinds = anomaly::AnomalyConfig::default().mail_kinds;
+        for (kind, min) in &self.mail_kinds {
+            let names = || anomaly::Kind::ALL.map(anomaly::Kind::name).join(", ");
+            let kind = anomaly::Kind::parse(kind).ok_or_else(|| anyhow::anyhow!("anomaly.mail_kinds: unbekannte Art {kind:?}, erlaubt sind {}", names()))?;
+            let min = match min.trim().to_ascii_lowercase().as_str() {
+                "off" | "aus" => None,
+                other => Some(anomaly::Severity::parse(other).ok_or_else(|| {
+                    anyhow::anyhow!("anomaly.mail_kinds.{}: erlaubt sind info, warn, high, off – nicht {min:?}", kind.name())
+                })?),
+            };
+            kinds.insert(kind, min);
+        }
+        Ok(kinds)
+    }
+
     fn config(&self, secure_delete: bool, max_mails_per_hour: u32) -> Result<anomaly::AnomalyConfig> {
         let nets = |key: &str, list: &[String]| model::LocalNetworks::parse(list).map_err(|e| anyhow::anyhow!("anomaly.{key}: {e}"));
         let mib = 1024.0 * 1024.0;
@@ -274,6 +294,7 @@ impl AnomalySection {
             mail: self.mail,
             mail_min_severity: anomaly::Severity::parse(&self.mail_min_severity)
                 .ok_or_else(|| anyhow::anyhow!("anomaly.mail_min_severity: erlaubt sind info, warn, high – nicht {:?}", self.mail_min_severity))?,
+            mail_kinds: self.mail_kinds()?,
             max_mails_per_hour,
             policy: anomaly::policy::Policy::new(&self.zones, &self.rules).map_err(|e| anyhow::anyhow!("anomaly.{e}"))?,
             beacon: anomaly::beacon::BeaconConfig {
@@ -656,5 +677,29 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_config_is_valid() {
+        let config: Config = toml::from_str(include_str!("../../../config.example.toml")).unwrap();
+        config.anomaly.config(true, 20).unwrap();
+    }
+
+    #[test]
+    fn mail_kinds_are_parsed() {
+        let section: AnomalySection = toml::from_str(r#"mail_kinds = { dns = "warn", country = "off" }"#).unwrap();
+        let kinds = section.mail_kinds().unwrap();
+        assert_eq!(kinds[&anomaly::Kind::Dns], Some(anomaly::Severity::Warn));
+        assert_eq!(kinds[&anomaly::Kind::Country], None);
+        assert_eq!(kinds[&anomaly::Kind::Beacon], None, "Beaconing bleibt ohne Eintrag aus");
+        let bad: AnomalySection = toml::from_str(r#"mail_kinds = { portscan = "high" }"#).unwrap();
+        assert!(bad.mail_kinds().is_err());
+        let bad: AnomalySection = toml::from_str(r#"mail_kinds = { scan = "hoch" }"#).unwrap();
+        assert!(bad.mail_kinds().is_err());
     }
 }

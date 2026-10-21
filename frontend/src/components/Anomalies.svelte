@@ -95,6 +95,8 @@
   const learnedDays = $derived(status ? (Date.now() - status.started_ms) / DAY : 0);
   const learnFill = $derived(status?.learning_days ? Math.min(1, learnedDays / status.learning_days) : 1);
   const ml = $derived(status?.ml);
+  // welche Arten ab welcher Schwere per Mail gehen
+  const mailKinds = $derived(Object.entries(status?.mail_kinds ?? {}).map(([k, min]) => `${(KINDS[k] ?? KINDS.stat).label} ab ${SEVERITY[min]?.[1] ?? min}`));
   const fmtValue = (f) => (f.bytes ? fmtBytes(f.value) : f.percent ? `${Math.round(f.value * 100)} %` : fmtNum(f.value));
   // Zeitleiste: gestapelte Balken je Abschnitt (unten hoch, darüber warnung und info)
   const TL_H = 96;
@@ -220,8 +222,11 @@
               <span class="chip"><span class="led bg-ctp-overlay0"></span>info {status.counts_24h.info}</span>
             </div>
             <div class="mt-2 text-[11px] text-ctp-overlay0">
-              netz-regeln: {status.policy_rules ? `${status.policy_rules} regeln, ${status.policy_zones} zonen` : 'keine'} · beaconing {status.beacon ? `an (${fmtNum(status.beacon_pairs)} paare)` : 'aus'} · mails {status.mail ? 'an' : 'aus'}
+              netz-regeln: {status.policy_rules ? `${status.policy_rules} regeln, ${status.policy_zones} zonen` : 'keine'} · beaconing {status.beacon ? `an (${fmtNum(status.beacon_pairs)} paare)` : 'aus'} · mails {status.mail ? (mailKinds.length ? 'an' : 'an, aber alle arten aus') : 'aus'}
             </div>
+            {#if status.mail && mailKinds.length}
+              <div class="mt-1 text-[11px] text-ctp-overlay0" title="[anomaly] mail_min_severity und mail_kinds">mails für: {mailKinds.join(', ')}</div>
+            {/if}
           </div>
         </div>
       {/if}

@@ -737,8 +737,28 @@ Abschnitt, den sie überdeckt. Ein Klick auf einen Balken zeigt in der Liste nur
 die Auswahl auf. Die Filter für Art, Schwere und Host gelten auch für die Zeitleiste.
 
 **Mails** sind zunächst aus. Mit `mail = true` gehen **neue** Auffälligkeiten ab `mail_min_severity` (Standard `high`) an die
-Admins aus `[email]`, begrenzt durch `alerts.max_mails_per_hour`. Verlängerte Zeilen lösen keine weitere Mail aus,
-Beaconing nie. Erst einschalten, wenn die Schwellen zum eigenen Netz passen. Jede Auffälligkeit steht zusätzlich im Log.
+Admins aus `[email]`, begrenzt durch `alerts.max_mails_per_hour`. Verlängerte Zeilen lösen keine weitere Mail aus.
+Erst einschalten, wenn die Schwellen zum eigenen Netz passen. Jede Auffälligkeit steht zusätzlich im Log.
+
+Mit `mail_kinds` bekommt jede Art einen eigenen Schalter: eine eigene Mindest-Schwere oder `"off"`. Nicht genannte
+Arten nutzen `mail_min_severity`, Beaconing bleibt ohne Eintrag aus. Die Web-UI zeigt unter „letzte 24 h“, welche Arten
+ab welcher Schwere per Mail gehen.
+
+```toml
+mail = true
+mail_min_severity = "high"
+mail_kinds = { dns = "warn", country = "off" }   # externes DNS schon ab warnung, neue Länder nie
+```
+
+| Schlüssel | Art | Schwere der Meldungen |
+|---|---|---|
+| `stat` | statistik | warnung oder hoch |
+| `ml` | ml | info |
+| `scan` | portscan | hoch |
+| `dns` | externes dns | warnung |
+| `country` | neues land | info |
+| `policy` | netz-regel | je Regel (`severity`) |
+| `beacon` | beaconing | info |
 
 ### Einstellen in der Praxis
 
