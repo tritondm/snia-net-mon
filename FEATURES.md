@@ -767,6 +767,37 @@ mail_kinds = { dns = "warn", country = "off" }   # external DNS from warn alread
 | `policy` | network rule | per rule (`severity`) |
 | `beacon` | beaconing | info |
 
+### Exceptions in the web UI
+
+Harmless hits can be excepted straight from the list, without `config.toml` and without a restart: expand the anomaly,
+**"ausnahme anlegen…"**. Kind, host and target are prefilled, three buttons choose the scope: **only this host**,
+**host + target** or **all hosts to this target**. Add a comment and optionally a date until which the exception
+applies (empty = indefinitely).
+
+| Kind | Target of an exception |
+|---|---|
+| external dns | resolver (IP or network). With several resolvers the report is only hidden if all are permitted; permitted resolvers are no longer named in new reports |
+| beaconing | provider `AS8075`, provider and port `AS8075:443` or peer (IP or network) |
+| network rule | name of the rule |
+| new country | country code, e.g. `CN` |
+| port scan, statistics, ml | no target, only the host |
+
+Host is an IP or a network (`10.6.0.0/16`); empty applies to all hosts. An exception without both host and target is
+not possible – use `mail_kinds` or the switches of the detection itself for that.
+
+Excepted anomalies are **still stored** but hidden from list, timeline and counters and **never mailed**. This also
+applies retroactively: a new exception hides matching older reports, a deleted or expired one shows them again. The
+**"ausgenommene"** switch in the list shows them dimmed with the number of the exception.
+
+The **"Ausnahmen"** window lists all entries with hits (hidden reports within the retention period) and the last hit –
+so exceptions that no longer do anything stand out. Every exception can be edited and deleted. **Export** as JSON (for
+backup or moving to another server) or CSV (for Excel, semicolon separated); **import** reads a JSON export and skips
+exceptions that already exist.
+
+The exceptions live in `anomaly.db` and complement the entries in `config.toml` (`ignore`, `dns_servers`,
+`dns_clients`, `beacon_allow` …). Whatever permanently applies to a whole network belongs in the configuration rather;
+the web UI is meant for individual cases and quick reactions.
+
 ### Tuning in practice
 
 After the learning phase it is worth looking at the list of the first few days. Typical cases:
@@ -988,7 +1019,11 @@ How long data is kept overall and what that means for privacy is described under
 | GET | `/api/stats/geo` | traffic of external peers by country (`countries`) and ASN (`asns`), `limit` ≤ 50 |
 | GET | `/api/stats/sankey` | nodes/edges source → service → destination, `limit` = number of connections |
 | WS | `/api/live` | on connect `{"type":"history"}`, then every second `{"type":"tick"}` with rate (total, `bytes_in`, `bytes_out`), active connections incl. direction, counters and GeoIP |
-| GET | `/api/anomalies` | anomalies, newest first, with country and provider of the external IPs. Parameters: `from`, `to` (Unix ms), `kind` (`stat`, `ml`, `scan`, `dns`, `country`, `policy`, `beacon`), `host`, `severity` (minimum severity `info`/`warn`/`high`), `limit` (≤ 5000) |
+| GET | `/api/anomalies` | anomalies, newest first, with country and provider of the external IPs. Parameters: `from`, `to` (Unix ms), `kind` (`stat`, `ml`, `scan`, `dns`, `country`, `policy`, `beacon`), `host`, `severity` (minimum severity `info`/`warn`/`high`), `limit` (≤ 5000), `excepted=true` (include excepted ones) |
+| GET | `/api/anomalies/exceptions` | exceptions with hits (`hits`, `last_hit_ms`) |
+| POST | `/api/anomalies/exceptions` | create an exception: `{kind, host, target, comment, expires_ms}`; invalid input gives 400 with a reason |
+| PUT | `/api/anomalies/exceptions/{id}` | change an exception (same fields) |
+| DELETE | `/api/anomalies/exceptions/{id}` | delete an exception |
 | GET | `/api/anomalies/timeline` | timeline: per period the anomalies active in it by severity (`[{ts, info, warn, high}]`). Parameters: `from`, `to`, `bucket` (length of a period in ms, default 1 h, at most 500 periods) plus the same filters as `/api/anomalies` |
 | GET | `/api/anomalies/status` | learning phase, number of groups and host profiles, last window, Isolation Forest (training, threshold, score quantiles), beaconing (observed pairs), counters for the last 24 h |
 | GET | `/api/archives` | history (size, period, `compressing`) and archives with `state` (`packed`, `unpacking`, `ready`, `failed`) |

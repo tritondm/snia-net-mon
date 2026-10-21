@@ -1,7 +1,8 @@
 //! Eigene kleine SQLite-Datei (`anomaly.db`): Baselines je Gruppe und Slot, bekannte Länder je Gruppe, Trainingsvektoren
-//! für den Isolation Forest (**ohne IP-Adresse**) und die gemeldeten Auffälligkeiten.
+//! für den Isolation Forest (**ohne IP-Adresse**), die gemeldeten Auffälligkeiten und die Ausnahmen aus der Web-UI.
 
 use crate::baseline::{Profile, Stat};
+use crate::exceptions::{ExceptionRow, Exceptions, Normalized};
 use crate::features::FEATURES;
 use crate::forest::{DIMS, Vector};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -107,6 +108,8 @@ pub struct EventRow {
     pub score: f64,
     pub title: String,
     pub detail: serde_json::Value,
+    /// Ausnahme, die diese Auffälligkeit ausblendet
+    pub exception_id: Option<i64>,
 }
 
 /// Filter für `GET /api/anomalies`.
@@ -121,6 +124,9 @@ pub struct EventFilter {
     pub limit: Option<u32>,
     /// Nur Zeitleiste: Länge eines Abschnitts in ms
     pub bucket: Option<i64>,
+    /// Auch Auffälligkeiten zeigen, die eine Ausnahme ausblendet
+    #[serde(default)]
+    pub excepted: bool,
 }
 
 /// Ein Abschnitt der Zeitleiste: Auffälligkeiten, die in diesem Zeitraum aktiv waren, je Schwere.
@@ -189,9 +195,24 @@ impl Store {
                  title    TEXT    NOT NULL,
                  detail   TEXT    NOT NULL    -- JSON
              );
-             CREATE INDEX IF NOT EXISTS idx_events_last ON events (last_ts);",
+             CREATE INDEX IF NOT EXISTS idx_events_last ON events (last_ts);
+             CREATE TABLE IF NOT EXISTS exceptions (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,   -- Nummern gelöschter Ausnahmen nicht wiederverwenden
+                 kind       TEXT    NOT NULL,
+                 host       TEXT,               -- IP oder Netz, NULL = alle Hosts
+                 target     TEXT,               -- je nach Art Resolver, Anbieter, Regel oder Land
+                 comment    TEXT    NOT NULL,
+                 created_ms INTEGER NOT NULL,
+                 updated_ms INTEGER NOT NULL,
+                 expires_ms INTEGER             -- NULL = unbefristet
+             );",
             if secure_delete { "ON" } else { "OFF" }
         ))?;
+        // ältere Datenbanken: Spalte für die Ausnahme nachrüsten
+        let has_column: bool = conn.query_row("SELECT count(*) FROM pragma_table_info('events') WHERE name = 'exception_id'", [], |r| r.get(0))?;
+        if !has_column {
+            conn.execute_batch("ALTER TABLE events ADD COLUMN exception_id INTEGER;")?;
+        }
         Ok(Self { conn })
     }
 
@@ -276,10 +297,11 @@ impl Store {
         self.conn.query_row("SELECT count(*) FROM vectors", [], |r| r.get::<_, i64>(0)).map(|n| n as u64)
     }
 
-    pub fn insert_event(&self, e: &Event) -> rusqlite::Result<i64> {
+    pub fn insert_event(&self, e: &Event, exception: Option<i64>) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO events (ts, last_ts, count, host, grp, kind, severity, score, title, detail) VALUES (?1, ?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![e.ts, e.host, e.group, e.kind.name(), e.severity as i64, e.score, e.title, e.detail.to_string()],
+            "INSERT INTO events (ts, last_ts, count, host, grp, kind, severity, score, title, detail, exception_id)
+             VALUES (?1, ?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![e.ts, e.host, e.group, e.kind.name(), e.severity as i64, e.score, e.title, e.detail.to_string(), exception],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -305,14 +327,14 @@ impl Store {
         let kind = f.kind.as_deref().filter(|k| !k.is_empty()).map(|k| Kind::parse(k).map(Kind::name).unwrap_or("?"));
         let severity = f.severity.as_deref().and_then(Severity::parse).unwrap_or(Severity::Info) as i64;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, ts, last_ts, count, host, grp, kind, severity, score, title, detail FROM events
+            "SELECT id, ts, last_ts, count, host, grp, kind, severity, score, title, detail, exception_id FROM events
              WHERE last_ts >= ?1 AND ts <= ?2 AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR host = ?4) AND severity >= ?5
-               AND (?7 IS NULL OR instr(host, ?7) > 0)
+               AND (?7 IS NULL OR instr(host, ?7) > 0) AND (?8 OR exception_id IS NULL)
              ORDER BY last_ts DESC, id DESC LIMIT ?6",
         )?;
         let (host, part) = host_filter(f);
         let limit = f.limit.unwrap_or(500).clamp(1, 5000);
-        let rows = stmt.query_map(params![f.from.unwrap_or(0), f.to.unwrap_or(i64::MAX), kind, host, severity, limit, part], |r| {
+        let rows = stmt.query_map(params![f.from.unwrap_or(0), f.to.unwrap_or(i64::MAX), kind, host, severity, limit, part, f.excepted], |r| {
             let kind: String = r.get(6)?;
             let detail: String = r.get(10)?;
             Ok(EventRow {
@@ -327,6 +349,7 @@ impl Store {
                 score: r.get(8)?,
                 title: r.get(9)?,
                 detail: serde_json::from_str(&detail).unwrap_or(serde_json::Value::Null),
+                exception_id: r.get(11)?,
             })
         })?;
         rows.collect()
@@ -347,9 +370,9 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT ts, last_ts, severity FROM events
              WHERE last_ts >= ?1 AND ts <= ?2 AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR host = ?4) AND severity >= ?5
-               AND (?6 IS NULL OR instr(host, ?6) > 0)",
+               AND (?6 IS NULL OR instr(host, ?6) > 0) AND (?7 OR exception_id IS NULL)",
         )?;
-        let rows = stmt.query_map(params![first, to, kind, host, severity, part], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?;
+        let rows = stmt.query_map(params![first, to, kind, host, severity, part, f.excepted], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?;
         for row in rows {
             let (ts, last_ts, sev) = row?;
             let lo = ((ts.max(first) - first) / bucket) as usize;
@@ -367,7 +390,7 @@ impl Store {
 
     /// Anzahl Auffälligkeiten je Schwere, die seit `since` noch aktiv waren.
     pub fn counts(&self, since: i64) -> rusqlite::Result<Counts> {
-        let mut stmt = self.conn.prepare_cached("SELECT severity, count(*) FROM events WHERE last_ts >= ?1 GROUP BY severity")?;
+        let mut stmt = self.conn.prepare_cached("SELECT severity, count(*) FROM events WHERE last_ts >= ?1 AND exception_id IS NULL GROUP BY severity")?;
         let mut counts = Counts::default();
         for row in stmt.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64)))? {
             let (severity, n) = row?;
@@ -388,6 +411,78 @@ impl Store {
             self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
         }
         Ok((vectors, events))
+    }
+
+    /// Alle Ausnahmen mit ihren Treffern (ausgeblendete Auffälligkeiten), neueste zuerst.
+    pub fn exceptions(&self) -> rusqlite::Result<Vec<ExceptionRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT x.id, x.kind, x.host, x.target, x.comment, x.created_ms, x.updated_ms, x.expires_ms, count(e.id), max(e.last_ts)
+             FROM exceptions x LEFT JOIN events e ON e.exception_id = x.id
+             GROUP BY x.id ORDER BY x.id DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let kind: String = r.get(1)?;
+            Ok(ExceptionRow {
+                id: r.get(0)?,
+                kind: Kind::parse(&kind).map(Kind::name).unwrap_or("?"),
+                host: r.get(2)?,
+                target: r.get(3)?,
+                comment: r.get(4)?,
+                created_ms: r.get(5)?,
+                updated_ms: r.get(6)?,
+                expires_ms: r.get(7)?,
+                hits: r.get(8)?,
+                last_hit_ms: r.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Ausnahme anlegen (`id = None`) oder ändern. `None` = die zu ändernde Ausnahme gibt es nicht.
+    pub fn save_exception(&self, id: Option<i64>, x: &Normalized, now: i64) -> rusqlite::Result<Option<i64>> {
+        let p = params![x.kind.name(), x.host, x.target, x.comment, now, x.expires_ms];
+        match id {
+            None => {
+                self.conn.execute("INSERT INTO exceptions (kind, host, target, comment, created_ms, updated_ms, expires_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)", p)?;
+                Ok(Some(self.conn.last_insert_rowid()))
+            }
+            Some(id) => {
+                let n = self.conn.execute(
+                    "UPDATE exceptions SET kind = ?1, host = ?2, target = ?3, comment = ?4, updated_ms = ?5, expires_ms = ?6 WHERE id = ?7",
+                    params![x.kind.name(), x.host, x.target, x.comment, now, x.expires_ms, id],
+                )?;
+                Ok((n > 0).then_some(id))
+            }
+        }
+    }
+
+    pub fn delete_exception(&self, id: i64) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute("DELETE FROM exceptions WHERE id = ?1", [id])? > 0)
+    }
+
+    /// Alle gespeicherten Auffälligkeiten den geltenden Ausnahmen neu zuordnen. Liefert die Zahl geänderter Zeilen.
+    pub fn assign_exceptions(&mut self, ex: &Exceptions, now: i64) -> rusqlite::Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        {
+            let mut select = tx.prepare("SELECT id, kind, host, detail, exception_id FROM events")?;
+            let mut update = tx.prepare("UPDATE events SET exception_id = ?2 WHERE id = ?1")?;
+            let rows = select.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<i64>>(4)?))
+            })?;
+            for row in rows {
+                let (id, kind, host, detail, old) = row?;
+                let Some(kind) = Kind::parse(&kind) else { continue };
+                let detail: serde_json::Value = serde_json::from_str(&detail).unwrap_or(serde_json::Value::Null);
+                let new = ex.for_event(kind, &host, &detail, now);
+                if new != old {
+                    update.execute(params![id, new])?;
+                    changed += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 }
 
@@ -440,9 +535,9 @@ mod tests {
         assert_eq!(store.vectors(0).unwrap(), vec![[1.5; DIMS], [2.5; DIMS]]);
         assert_eq!(store.meta("started_ms").unwrap(), Some(42));
 
-        let id = store.insert_event(&event(600_000, Kind::Stat, Severity::Warn)).unwrap();
+        let id = store.insert_event(&event(600_000, Kind::Stat, Severity::Warn), None).unwrap();
         store.extend_event(id, &event(1_200_000, Kind::Stat, Severity::High), false).unwrap();
-        store.insert_event(&event(1_200_000, Kind::Scan, Severity::Info)).unwrap();
+        store.insert_event(&event(1_200_000, Kind::Scan, Severity::Info), None).unwrap();
         let rows = store.events(&EventFilter::default()).unwrap();
         assert_eq!(rows.len(), 2);
         let stat = rows.iter().find(|r| r.kind == "stat").unwrap();
@@ -466,6 +561,36 @@ mod tests {
 
         assert_eq!(store.prune(2000, 1_000_000).unwrap(), (2, 0));
         assert_eq!(store.prune(2000, 1_300_000).unwrap(), (0, 2));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn exceptions_hide_events_until_removed() {
+        use crate::exceptions::{ExceptionInput, normalize};
+        let path = temp_path("exceptions");
+        let mut store = Store::open(&path, true).unwrap();
+        store.insert_event(&event(600_000, Kind::Scan, Severity::High), None).unwrap();
+        store.insert_event(&event(600_000, Kind::Stat, Severity::Warn), None).unwrap();
+        let visible = |store: &Store| store.events(&EventFilter::default()).unwrap().len();
+
+        let input = ExceptionInput { kind: "scan".into(), host: Some("10.0.0.0/24".into()), comment: "test".into(), ..Default::default() };
+        let id = store.save_exception(None, &normalize(&input).unwrap(), 1).unwrap().unwrap();
+        let ex = Exceptions::from_rows(&store.exceptions().unwrap());
+        assert_eq!(store.assign_exceptions(&ex, 1).unwrap(), 1);
+        assert_eq!(visible(&store), 1, "portscan ausgeblendet");
+        assert_eq!(store.events(&EventFilter { excepted: true, ..Default::default() }).unwrap().len(), 2);
+        assert_eq!((store.counts(0).unwrap().high, store.counts(0).unwrap().warn), (0, 1), "zählt nicht mit");
+        let row = &store.exceptions().unwrap()[0];
+        assert_eq!((row.id, row.hits, row.last_hit_ms, row.kind), (id, 1, Some(600_000), "scan"));
+
+        assert_eq!(store.save_exception(Some(id + 1), &normalize(&input).unwrap(), 2).unwrap(), None, "unbekannte id");
+        assert!(store.delete_exception(id).unwrap());
+        let ex = Exceptions::from_rows(&store.exceptions().unwrap());
+        assert_eq!(store.assign_exceptions(&ex, 2).unwrap(), 1);
+        assert_eq!(visible(&store), 2, "wieder sichtbar");
+        drop(store);
+        // Spalte exception_id bleibt beim erneuten Öffnen erhalten (Migration läuft nur einmal)
+        Store::open(&path, true).unwrap();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

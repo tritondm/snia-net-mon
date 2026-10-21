@@ -80,6 +80,7 @@ Daten sind deshalb **personenbezogen** im Sinne der DSGVO. Das gilt besonders an
 | **Trainingsvektoren** | Merkmale je Host-Fenster (Volumen, Anzahl Ziele, Ports, Länder, Uhrzeit), **ohne IP-Adresse** | `anomaly.db` | 14 Tage (`ml_training_days`) |
 | **Beaconing** | Startzeiten ausgehender Verbindungen je Host, Ziel und Port | nur im Arbeitsspeicher | 12 h, weg nach einem Neustart |
 | **Auffälligkeiten** | Host-IP, Netzgruppe, Zeitraum, Befund mit Werten; bei DNS die Resolver, bei Portscans ein Auszug der Ziele | `anomaly.db`, Log, optional Mail | 30 Tage (`event_retention_days`) |
+| **Ausnahmen** | Art, Host-IP oder Netz, Ziel, Kommentar, Ablaufdatum | `anomaly.db` | bis zum Löschen in der Web-UI |
 
 Land und ASN einer IP werden lokal aus den GeoLite2-Dateien nachgeschlagen, nicht gespeichert. Snia-Net-Mon schickt
 keine Verbindungsdaten nach außen. Die einzige ausgehende Verbindung ist der optionale Download der GeoIP-Datenbanken bei

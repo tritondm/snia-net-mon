@@ -81,6 +81,7 @@ network.
 | **Training vectors** | features per host window (volume, number of peers, ports, countries, time of day), **without IP address** | `anomaly.db` | 14 days (`ml_training_days`) |
 | **Beaconing** | start times of outgoing connections per host, destination and port | memory only | 12 h, gone after a restart |
 | **Anomalies** | host IP, network group, period, finding with values; for DNS the resolvers, for port scans a sample of the targets | `anomaly.db`, log, optionally mail | 30 days (`event_retention_days`) |
+| **Exceptions** | kind, host IP or network, target, comment, expiry date | `anomaly.db` | until deleted in the web UI |
 
 Country and ASN of an IP are looked up locally in the GeoLite2 files, not stored. Snia-Net-Mon does not send any
 connection data to the outside. The only outgoing connection is the optional download of the GeoIP databases from

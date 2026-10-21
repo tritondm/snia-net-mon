@@ -2,6 +2,9 @@
   // Anomalie-Erkennung: Status (Lernphase, Baseline, Isolation Forest), Zeitleiste und Liste der Auffälligkeiten.
   // Klick auf einen Balken der Zeitleiste zeigt in der Liste nur diesen Abschnitt.
   import Window from './Window.svelte';
+  import ExceptionDialog from './ExceptionDialog.svelte';
+  import AnomalyExceptions from './AnomalyExceptions.svelte';
+  import { KINDS, SEVERITY, targetsOf } from '../lib/anomaly.js';
   import { api } from '../lib/api.js';
   import { searchFor } from '../lib/state.svelte.js';
   import { fmtBytes, fmtDate, fmtNum, flag, geoTitle } from '../lib/format.js';
@@ -10,11 +13,13 @@
   let rows = $state([]);
   let error = $state('');
   let disabled = $state(false);
-  let filter = $state({ range: '24h', kind: '', severity: '', host: '' });
+  let filter = $state({ range: '24h', kind: '', severity: '', host: '', excepted: false });
   let open = $state(null); // id der aufgeklappten Zeile
   let timeline = $state([]);
   let slot = $state(null); // gewählter Abschnitt der Zeitleiste {from, to}
   let tlWidth = $state(800);
+  let exceptions = $state([]);
+  let dialog = $state(null); // { value, targets, event } des offenen Ausnahme-Dialogs
 
   const HOUR = 3_600_000;
   const DAY = 24 * HOUR;
@@ -46,29 +51,15 @@
     }
     return d.getTime();
   }
-  const KINDS = {
-    stat: { label: 'statistik', color: 'text-ctp-peach border-ctp-peach/50', title: 'Merkmale weit über der Baseline' },
-    ml: { label: 'ml', color: 'text-ctp-mauve border-ctp-mauve/50', title: 'nur der Isolation Forest schlägt an' },
-    scan: { label: 'portscan', color: 'text-ctp-red border-ctp-red/50', title: 'viele fehlgeschlagene TCP-Verbindungsversuche' },
-    dns: { label: 'externes dns', color: 'text-ctp-yellow border-ctp-yellow/50', title: 'DNS an externe Resolver statt an den eigenen' },
-    country: { label: 'neues land', color: 'text-ctp-sapphire border-ctp-sapphire/50', title: 'erste Verbindung der Gruppe in dieses Land' },
-    policy: { label: 'netz-regel', color: 'text-ctp-pink border-ctp-pink/50', title: 'Verstoß gegen eine Netz-Regel aus [anomaly] rules' },
-    beacon: { label: 'beaconing', color: 'text-ctp-lavender border-ctp-lavender/50', title: 'regelmäßige Verbindungen zum selben externen Ziel' },
-  };
-  const SEVERITY = {
-    info: ['bg-ctp-overlay0', 'info'],
-    warn: ['bg-ctp-yellow', 'warnung'],
-    high: ['bg-ctp-red animate-pulse-dot', 'hoch'],
-  };
-
   async function load() {
     try {
       const r = range();
-      const query = { kind: filter.kind, severity: filter.severity, host: filter.host.trim() };
-      [status, timeline, rows] = await Promise.all([
+      const query = { kind: filter.kind, severity: filter.severity, host: filter.host.trim(), excepted: filter.excepted ? 'true' : '' };
+      [status, timeline, rows, exceptions] = await Promise.all([
         api('/anomalies/status'),
         api('/anomalies/timeline', { query: { ...query, from: timelineStart(r), bucket: r[3] } }),
         api('/anomalies', { query: { ...query, from: slot?.from ?? timelineStart(r), to: slot?.to, limit: 1000 } }),
+        api('/anomalies/exceptions'),
       ]);
       error = '';
       disabled = false;
@@ -85,7 +76,7 @@
   });
 
   $effect(() => {
-    filter.range, filter.kind, filter.severity, filter.host, slot;
+    filter.range, filter.kind, filter.severity, filter.host, filter.excepted, slot;
     // kurz warten, damit nicht jeder Tastendruck im Host-Feld eine Abfrage auslöst
     const first = setTimeout(load, 250);
     const id = setInterval(load, 30_000);
@@ -143,6 +134,16 @@
     if (sort.key === key) sort.dir = -sort.dir;
     else sort = { key, dir: ['ts', 'last_ts', 'severity'].includes(key) ? -1 : 1 };
   }
+  /** Ausnahme-Dialog: neu (aus einer Auffälligkeit oder leer) oder eine bestehende bearbeiten. */
+  function exceptionFor(r) {
+    const targets = targetsOf(r);
+    dialog = { value: { kind: r.kind, host: r.host, target: targets[0] ?? '' }, targets, event: r };
+  }
+  function editException(x) {
+    dialog = { value: x ?? { kind: 'dns', host: '', target: '' }, targets: [], event: null };
+  }
+  const exceptionById = $derived(new Map(exceptions.map((x) => [x.id, x])));
+
   const hosts = $derived([...new Set(rows.map((r) => r.host))].sort((a, b) => cmp(ipKey(a), ipKey(b))));
   const fmtInterval = (s) => (s >= 90 ? `${(s / 60).toFixed(1)} min` : `${Math.round(s)} s`);
   const fmtTypical = (f) => (f.bytes ? fmtBytes(f.typical) : f.percent ? `${Math.round(f.typical * 100)} %` : fmtNum(f.typical));
@@ -289,7 +290,10 @@
           <option value="high">nur hoch</option>
         </select>
         <div class="relative">
-          <input class="input !w-40 !py-0.5 !pr-5 text-[11px]" placeholder="host-ip oder teil davon" list="anomaly-hosts" bind:value={filter.host} />
+          <label class="chip cursor-pointer" title="auch auffälligkeiten zeigen, die eine ausnahme ausblendet"
+          ><input type="checkbox" class="accent-ctp-teal" bind:checked={filter.excepted} />ausgenommene</label
+        >
+        <input class="input !w-40 !py-0.5 !pr-5 text-[11px]" placeholder="host-ip oder teil davon" list="anomaly-hosts" bind:value={filter.host} />
           {#if filter.host}<button class="absolute right-1.5 top-1/2 -translate-y-1/2 text-ctp-overlay1 hover:text-ctp-text" title="host-filter aufheben" onclick={() => (filter.host = '')}>✕</button>{/if}
           <datalist id="anomaly-hosts">{#each hosts as h}<option value={h}></option>{/each}</datalist>
         </div>
@@ -310,7 +314,7 @@
         <tbody>
           {#each sorted as r (r.id)}
             {@const kind = KINDS[r.kind] ?? KINDS.stat}
-            <tr class="cursor-pointer" onclick={() => (open = open === r.id ? null : r.id)}>
+            <tr class="cursor-pointer {r.exception_id ? 'opacity-50' : ''}" onclick={() => (open = open === r.id ? null : r.id)}>
               <td title={SEVERITY[r.severity]?.[1]}><span class="led {SEVERITY[r.severity]?.[0]}"></span></td>
               <td class="tabular-nums text-ctp-subtext0" title="erstes fenster">{fmtDate(r.ts)}</td>
               <td class="tabular-nums text-ctp-subtext0" title="letztes fenster">
@@ -328,6 +332,7 @@
               <td class="text-ctp-overlay1">{r.group}</td>
               <td class="whitespace-normal text-ctp-text [overflow-wrap:anywhere]">
                 {#if r.kind === 'country'}<span class="mr-1">{flag(r.detail?.cc)}</span>{/if}{#if r.kind === 'beacon'}{r.title}{:else}{@render ipText(r.title, r.geo)}{/if}
+                {#if r.exception_id}<span class="chip ml-1 !py-0 text-ctp-overlay1" title={exceptionById.get(r.exception_id)?.comment}>ausgenommen #{r.exception_id}</span>{/if}
                 {#if r.kind === 'stat' && r.detail?.ml_score != null}
                   <span
                     class="chip ml-1 !py-0 {r.detail.ml_agrees ? 'border-ctp-mauve/60 text-ctp-mauve' : 'text-ctp-overlay0'}"
@@ -388,7 +393,16 @@
                   {:else if r.kind === 'country'}
                     <div>{flag(r.detail.cc)} {r.detail.cc} · {fmtBytes(r.detail.bytes)} hochgeladen im ersten fenster</div>
                   {/if}
-                  <div class="mt-2 text-ctp-overlay0">zuletzt {fmtDate(r.last_ts)} · klick auf die ip öffnet die flow-suche</div>
+                  <div class="mt-2 flex flex-wrap items-center gap-3 text-ctp-overlay0">
+                    <span>zuletzt {fmtDate(r.last_ts)} · klick auf die ip öffnet die flow-suche</span>
+                    {#if r.exception_id && exceptionById.has(r.exception_id)}
+                      <button class="chip hover:text-ctp-text" onclick={() => editException(exceptionById.get(r.exception_id))}>ausnahme #{r.exception_id} bearbeiten…</button>
+                    {:else}
+                      <button class="chip hover:text-ctp-text" title="solche auffälligkeiten künftig ausblenden und nicht mailen" onclick={() => exceptionFor(r)}
+                        >ausnahme anlegen…</button
+                      >
+                    {/if}
+                  </div>
                 </td>
               </tr>
             {/if}
@@ -402,5 +416,11 @@
         </tbody>
       </table>
     </Window>
+
+    <AnomalyExceptions list={exceptions} retentionDays={status?.event_retention_days} onedit={editException} onchanged={load} />
   {/if}
 </div>
+
+{#if dialog}
+  <ExceptionDialog {...dialog} onclose={() => (dialog = null)} onsaved={() => ((dialog = null), load())} />
+{/if}

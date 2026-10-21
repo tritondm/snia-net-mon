@@ -68,6 +68,8 @@ pub fn router(state: AppState, frontend_dir: PathBuf) -> Router {
         .route("/anomalies", get(anomalies))
         .route("/anomalies/status", get(anomaly_status))
         .route("/anomalies/timeline", get(anomaly_timeline))
+        .route("/anomalies/exceptions", get(anomaly_exceptions).post(create_exception))
+        .route("/anomalies/exceptions/{id}", axum::routing::put(update_exception).delete(delete_exception))
         .route("/archives", get(archives))
         .route("/archives/{name}/open", post(open_archive))
         .route("/pcap", get(pcap::list).post(pcap::upload).layer(DefaultBodyLimit::disable()))
@@ -95,8 +97,14 @@ impl IntoResponse for ApiError {
 
 impl From<anomaly::Error> for ApiError {
     fn from(err: anomaly::Error) -> Self {
-        tracing::error!(%err, "Fehler der Anomalie-Erkennung");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Fehler der Anomalie-Erkennung".into())
+        match err {
+            anomaly::Error::Invalid(msg) => ApiError(StatusCode::BAD_REQUEST, msg),
+            anomaly::Error::NotFound(msg) => ApiError(StatusCode::NOT_FOUND, msg),
+            other => {
+                tracing::error!(err = %other, "Fehler der Anomalie-Erkennung");
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Fehler der Anomalie-Erkennung".into())
+            }
+        }
     }
 }
 
@@ -222,6 +230,35 @@ fn public_ips(text: &str, out: &mut Vec<std::net::IpAddr>) {
 
 async fn anomaly_timeline(State(s): State<AppState>, Query(f): Query<anomaly::EventFilter>) -> ApiResult<Vec<anomaly::Bucket>> {
     Ok(Json(s.anomaly()?.timeline(f).await?))
+}
+
+async fn anomaly_exceptions(State(s): State<AppState>) -> ApiResult<Vec<anomaly::exceptions::ExceptionRow>> {
+    Ok(Json(s.anomaly()?.exceptions().await?))
+}
+
+async fn create_exception(
+    State(s): State<AppState>,
+    Json(input): Json<anomaly::exceptions::ExceptionInput>,
+) -> Result<(StatusCode, Json<anomaly::exceptions::ExceptionRow>), ApiError> {
+    let row = s.anomaly()?.save_exception(None, input).await?;
+    tracing::info!(id = row.id, kind = row.kind, host = ?row.host, target = ?row.target, "Ausnahme angelegt");
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
+async fn update_exception(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Json(input): Json<anomaly::exceptions::ExceptionInput>,
+) -> ApiResult<anomaly::exceptions::ExceptionRow> {
+    let row = s.anomaly()?.save_exception(Some(id), input).await?;
+    tracing::info!(id, kind = row.kind, host = ?row.host, target = ?row.target, "Ausnahme geändert");
+    Ok(Json(row))
+}
+
+async fn delete_exception(State(s): State<AppState>, Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+    s.anomaly()?.delete_exception(id).await?;
+    tracing::info!(id, "Ausnahme gelöscht");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn anomaly_status(State(s): State<AppState>) -> ApiResult<anomaly::Status> {

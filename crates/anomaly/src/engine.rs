@@ -3,6 +3,7 @@
 use crate::AnomalyConfig;
 use crate::baseline::{Baselines, SlotKind};
 use crate::beacon::{self, Finding, Tracker};
+use crate::exceptions::{ExceptionInput, ExceptionRow, Exceptions, Subject};
 use crate::features::{FEATURES, HostWindow, NAMES, PolicyHit, Window, is_bytes};
 use crate::forest::{self, Forest, Rng, SHARE, TIME, Vector};
 use crate::store::{Bucket, Counts, Event, EventFilter, EventRow, Kind, Severity, Store};
@@ -135,6 +136,8 @@ pub struct Status {
     pub last_window: Option<WindowInfo>,
     pub ml: MlStatus,
     pub counts_24h: Counts,
+    /// so lange bleiben gemeldete Auffälligkeiten gespeichert
+    pub event_retention_days: u64,
     pub mail: bool,
     /// Mail-Schwelle je Art (Name → info/warn/high), nur Arten, die per Mail gehen
     pub mail_kinds: std::collections::BTreeMap<&'static str, &'static str>,
@@ -155,7 +158,11 @@ pub(crate) struct Engine {
     countries: HashMap<String, HashSet<String>>,
     model: Option<Model>,
     started_ms: i64,
-    open: HashMap<(String, Kind, String), Open>,
+    /// laufende Auffälligkeiten zum Verlängern: Host, Art, Tag, Ausnahme
+    open: HashMap<(String, Kind, String, Option<i64>), Open>,
+    exceptions: Exceptions,
+    /// nächster Ablauf einer Ausnahme – dann werden die Meldungen neu zugeordnet
+    next_expiry: Option<i64>,
     last_window: Option<WindowInfo>,
     last_prune_ms: i64,
     last_train_attempt_ms: i64,
@@ -170,7 +177,7 @@ impl Engine {
             None => TimeZone::system(),
         };
         let groups = Groups::new(&cfg.groups, cfg.group_prefix_v4, cfg.group_prefix_v6).map_err(|e| crate::Error::Config(format!("anomaly.groups: {e}")))?;
-        let store = Store::open(&cfg.db_path, cfg.secure_delete)?;
+        let mut store = Store::open(&cfg.db_path, cfg.secure_delete)?;
         let started_ms = match store.meta("started_ms")? {
             Some(ms) => ms,
             None => {
@@ -180,6 +187,9 @@ impl Engine {
         };
         let baselines = Baselines::from_profiles(store.load_baselines()?);
         let countries = store.load_countries()?;
+        // Ausnahmen können abgelaufen sein, während der Server aus war
+        let exceptions = Exceptions::from_rows(&store.exceptions()?);
+        store.assign_exceptions(&exceptions, now)?;
         Ok(Self {
             cfg,
             tz,
@@ -190,6 +200,8 @@ impl Engine {
             model: None,
             started_ms,
             open: HashMap::new(),
+            next_expiry: exceptions.next_expiry(now),
+            exceptions,
             last_window: None,
             last_prune_ms: 0,
             last_train_attempt_ms: i64::MIN / 2,
@@ -252,7 +264,14 @@ impl Engine {
                 found.push(scan_event(end, &host, &group, h));
             }
             if self.cfg.dns_rule && !h.dns.is_empty() {
-                found.push(dns_event(end, &host, &group, h));
+                // Resolver, die eine Ausnahme erlaubt, nicht nennen – sind alle erlaubt, wird die Meldung ausgeblendet
+                let all: Vec<(IpAddr, u64)> = h.dns.iter().map(|(p, n)| (*p, *n)).collect();
+                let open: Vec<(IpAddr, u64)> = all
+                    .iter()
+                    .filter(|(p, _)| self.exceptions.find(Kind::Dns, &Subject { host: Some(*ip), peer: Some(*p), ..Default::default() }, now).is_none())
+                    .copied()
+                    .collect();
+                found.push(dns_event(end, &host, &group, if open.is_empty() { all } else { open }));
             }
             for (cc, bytes) in &h.countries {
                 if self.countries.entry(group.clone()).or_default().insert(cc.clone()) {
@@ -302,9 +321,14 @@ impl Engine {
             vectors.truncate(VECTORS_PER_WINDOW);
             self.store.add_vectors(end, &vectors)?;
         }
+        if self.next_expiry.is_some_and(|t| now >= t) {
+            self.reassign(now)?;
+        }
         let mut created = Vec::new();
         for event in found {
-            if self.record(&event)? {
+            // ausgenommene Auffälligkeiten werden gespeichert (ausgeblendet), aber nie gemailt
+            let exception = self.exceptions.for_event(event.kind, &event.host, &event.detail, now);
+            if self.record(&event, exception)? && exception.is_none() {
                 created.push(event);
             }
         }
@@ -322,8 +346,8 @@ impl Engine {
     }
 
     /// Auffälligkeit speichern oder eine laufende desselben Hosts verlängern. `true` = neu angelegt.
-    fn record(&mut self, event: &Event) -> rusqlite::Result<bool> {
-        let key = (event.host.clone(), event.kind, event.tag.clone());
+    fn record(&mut self, event: &Event, exception: Option<i64>) -> rusqlite::Result<bool> {
+        let key = (event.host.clone(), event.kind, event.tag.clone(), exception);
         if event.kind != Kind::Country
             && let Some(open) = self.open.get_mut(&key)
             && event.ts - open.last_ts <= MERGE_GAP_MS
@@ -334,7 +358,7 @@ impl Engine {
             open.score = open.score.max(event.score);
             return Ok(false);
         }
-        let id = self.store.insert_event(event)?;
+        let id = self.store.insert_event(event, exception)?;
         self.open.insert(key, Open { id, last_ts: event.ts, score: event.score });
         Ok(true)
     }
@@ -362,6 +386,37 @@ impl Engine {
             tracing::info!(vectors = data.len(), threshold, p50 = quantiles.p50, ms = started.elapsed().as_millis() as u64, "Isolation Forest trainiert");
             self.model = Some(Model { forest, threshold, quantiles, median, mad, trained_ms: now, vectors: data.len() });
         }
+        Ok(())
+    }
+
+    /// Ausnahmen neu laden und alle Meldungen neu zuordnen. Laufende Auffälligkeiten beginnen danach eine neue Zeile.
+    fn reassign(&mut self, now: i64) -> rusqlite::Result<()> {
+        self.exceptions = Exceptions::from_rows(&self.store.exceptions()?);
+        self.next_expiry = self.exceptions.next_expiry(now);
+        let changed = self.store.assign_exceptions(&self.exceptions, now)?;
+        self.open.clear();
+        tracing::debug!(changed, "Ausnahmen neu zugeordnet");
+        Ok(())
+    }
+
+    pub fn exceptions(&self) -> rusqlite::Result<Vec<ExceptionRow>> {
+        self.store.exceptions()
+    }
+
+    /// Ausnahme anlegen (`id = None`) oder ändern; wirkt sofort auch auf bereits gespeicherte Meldungen.
+    pub fn save_exception(&mut self, id: Option<i64>, input: &ExceptionInput, now: i64) -> Result<ExceptionRow, crate::Error> {
+        let x = crate::exceptions::normalize(input).map_err(crate::Error::Invalid)?;
+        let id = self.store.save_exception(id, &x, now)?.ok_or_else(|| crate::Error::NotFound("Ausnahme gibt es nicht (mehr)".into()))?;
+        self.reassign(now)?;
+        let row = self.store.exceptions()?.into_iter().find(|r| r.id == id);
+        row.ok_or_else(|| crate::Error::NotFound("Ausnahme gibt es nicht (mehr)".into()))
+    }
+
+    pub fn delete_exception(&mut self, id: i64, now: i64) -> Result<(), crate::Error> {
+        if !self.store.delete_exception(id)? {
+            return Err(crate::Error::NotFound("Ausnahme gibt es nicht (mehr)".into()));
+        }
+        self.reassign(now)?;
         Ok(())
     }
 
@@ -397,6 +452,7 @@ impl Engine {
                 training_days: self.cfg.ml_training_days,
             },
             counts_24h: self.store.counts(now - DAY_MS)?,
+            event_retention_days: self.cfg.event_retention_days,
             mail: self.cfg.mail,
             mail_kinds: Kind::ALL.into_iter().filter_map(|k| Some((k.name(), self.cfg.mail_threshold(k)?.name()))).collect(),
             policy_rules: self.cfg.policy.rules.len(),
@@ -527,8 +583,7 @@ fn scan_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
     }
 }
 
-fn dns_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
-    let mut resolvers: Vec<(IpAddr, u64)> = h.dns.iter().map(|(ip, n)| (*ip, *n)).collect();
+fn dns_event(ts: i64, host: &str, group: &str, mut resolvers: Vec<(IpAddr, u64)>) -> Event {
     resolvers.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let total: u64 = resolvers.iter().map(|r| r.1).sum();
     let more = if resolvers.len() > 1 { format!(" · +{} weitere", resolvers.len() - 1) } else { String::new() };
@@ -726,6 +781,34 @@ mod tests {
         assert!((vienna.hour - 9.5).abs() < 1e-9);
         let sunday = local_time(&TimeZone::UTC, ms - DAY_MS);
         assert_eq!((sunday.week_slot, sunday.weekend), (6 * 24 + 7, true));
+    }
+
+    #[test]
+    fn exceptions_suppress_mails_and_filter_resolvers() {
+        let cfg = config("exceptions");
+        let dir = cfg.db_path.parent().unwrap().to_path_buf();
+        let mut engine = Engine::open(cfg, 0).unwrap();
+        let x = ExceptionInput { kind: "dns".into(), target: Some("9.9.9.9".into()), ..Default::default() };
+        let id = engine.save_exception(None, &x, 0).unwrap().id;
+        let geo = geo::GeoLookup::disabled();
+        let mut w = Window::new(0, true);
+        let dns = |src: &str, dst: &str| FlowRecord { proto: 17, ..flow(src, dst, 53, 80, 0, Direction::Out) };
+        w.add(&dns("10.0.1.10", "9.9.9.9"), &filters(), &geo); // nur erlaubter Resolver
+        w.add(&dns("10.0.1.11", "9.9.9.9"), &filters(), &geo); // erlaubter und fremder Resolver
+        w.add(&dns("10.0.1.11", "8.8.8.8"), &filters(), &geo);
+        let created = engine.finish_window(w, 60_000).unwrap();
+        assert_eq!(created.iter().map(|e| e.host.as_str()).collect::<Vec<_>>(), ["10.0.1.11"], "nur die nicht ausgenommene geht raus");
+        assert_eq!(created[0].detail["resolvers"][0]["ip"], "8.8.8.8", "erlaubter Resolver wird nicht genannt");
+        let all = engine.events(&EventFilter { excepted: true, ..Default::default() }).unwrap();
+        let hidden = all.iter().find(|r| r.host == "10.0.1.10").unwrap();
+        assert_eq!(hidden.exception_id, Some(id), "gespeichert, aber ausgeblendet");
+        assert_eq!(engine.events(&EventFilter::default()).unwrap().len(), 1);
+
+        // gelöschte Ausnahme: Meldung wieder sichtbar, die Nummer wird nicht neu vergeben
+        engine.delete_exception(id, 120_000).unwrap();
+        assert_eq!(engine.events(&EventFilter::default()).unwrap().len(), 2);
+        assert!(engine.save_exception(None, &x, 120_000).unwrap().id > id);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

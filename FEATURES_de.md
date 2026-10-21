@@ -760,6 +760,38 @@ mail_kinds = { dns = "warn", country = "off" }   # externes DNS schon ab warnung
 | `policy` | netz-regel | je Regel (`severity`) |
 | `beacon` | beaconing | info |
 
+### Ausnahmen in der Web-UI
+
+Harmlose Treffer lassen sich direkt in der Liste ausnehmen, ohne `config.toml` und ohne Neustart: Auffälligkeit
+aufklappen, **„ausnahme anlegen…“**. Art, Host und Ziel sind vorausgefüllt, drei Knöpfe wählen den Umfang:
+**nur dieser Host**, **Host + Ziel** oder **alle Hosts zu diesem Ziel**. Dazu ein Kommentar und optional ein Datum, bis
+zu dem die Ausnahme gilt (leer = unbefristet).
+
+| Art | Ziel einer Ausnahme |
+|---|---|
+| externes dns | Resolver (IP oder Netz). Bei mehreren Resolvern wird nur ausgeblendet, wenn alle erlaubt sind; erlaubte Resolver werden in neuen Meldungen nicht mehr genannt |
+| beaconing | Anbieter `AS8075`, Anbieter und Port `AS8075:443` oder Gegenstelle (IP oder Netz) |
+| netz-regel | Name der Regel |
+| neues land | Ländercode, z. B. `CN` |
+| portscan, statistik, ml | kein Ziel, nur der Host |
+
+Host ist eine IP oder ein Netz (`10.6.0.0/16`), leer gilt für alle Hosts. Ganz ohne Host und Ziel lässt sich keine
+Ausnahme anlegen – dafür gibt es `mail_kinds` bzw. die Schalter der jeweiligen Erkennung.
+
+Ausgenommene Auffälligkeiten werden **weiter gespeichert**, aber in Liste, Zeitleiste und Zählern ausgeblendet und **nie
+gemailt**. Das gilt auch rückwirkend: Eine neue Ausnahme blendet passende ältere Meldungen aus, eine gelöschte oder
+abgelaufene zeigt sie wieder. Der Schalter **„ausgenommene“** in der Liste blendet sie gedimmt mit der Nummer der
+Ausnahme ein.
+
+Das Fenster **„Ausnahmen“** listet alle Einträge mit Treffern (ausgeblendete Meldungen im Aufbewahrungszeitraum) und
+letztem Treffer – so fallen Ausnahmen auf, die nichts mehr bewirken. Jede Ausnahme lässt sich bearbeiten und löschen.
+**Export** als JSON (zum Sichern oder Übertragen auf einen anderen Server) oder CSV (für Excel, mit Semikolon);
+**Import** liest einen JSON-Export ein und überspringt Ausnahmen, die es schon gibt.
+
+Die Ausnahmen liegen in `anomaly.db` und ergänzen die Einträge in `config.toml` (`ignore`, `dns_servers`,
+`dns_clients`, `beacon_allow` …). Was dauerhaft für ein ganzes Netz gilt, gehört eher in die Konfiguration; die Web-UI
+ist für Einzelfälle und zum schnellen Reagieren gedacht.
+
 ### Einstellen in der Praxis
 
 Nach der Lernphase lohnt ein Blick auf die Liste der ersten Tage. Typische Fälle:
@@ -988,7 +1020,11 @@ Wie lange Daten damit insgesamt aufbewahrt werden und was das für den Datenschu
 | GET | `/api/stats/geo` | Verkehr externer Gegenstellen nach Land (`countries`) und ASN (`asns`), `limit` ≤ 50 |
 | GET | `/api/stats/sankey` | Knoten/Kanten Quelle → Dienst → Ziel, `limit` = Anzahl Verbindungen |
 | WS | `/api/live` | beim Verbinden `{"type":"history"}`, danach jede Sekunde `{"type":"tick"}` mit Rate (gesamt, `bytes_in`, `bytes_out`), aktiven Verbindungen inkl. Richtung, Zählern und GeoIP |
-| GET | `/api/anomalies` | Auffälligkeiten, neueste zuerst, mit Land und Anbieter der externen IPs. Parameter: `from`, `to` (Unix-ms), `kind` (`stat`, `ml`, `scan`, `dns`, `country`, `policy`, `beacon`), `host`, `severity` (Mindestschwere `info`/`warn`/`high`), `limit` (≤ 5000) |
+| GET | `/api/anomalies` | Auffälligkeiten, neueste zuerst, mit Land und Anbieter der externen IPs. Parameter: `from`, `to` (Unix-ms), `kind` (`stat`, `ml`, `scan`, `dns`, `country`, `policy`, `beacon`), `host`, `severity` (Mindestschwere `info`/`warn`/`high`), `limit` (≤ 5000), `excepted=true` (auch ausgenommene) |
+| GET | `/api/anomalies/exceptions` | Ausnahmen mit Treffern (`hits`, `last_hit_ms`) |
+| POST | `/api/anomalies/exceptions` | Ausnahme anlegen: `{kind, host, target, comment, expires_ms}`; ungültige Angaben ergeben 400 mit Begründung |
+| PUT | `/api/anomalies/exceptions/{id}` | Ausnahme ändern (gleiche Felder) |
+| DELETE | `/api/anomalies/exceptions/{id}` | Ausnahme löschen |
 | GET | `/api/anomalies/timeline` | Zeitleiste: je Abschnitt die darin aktiven Auffälligkeiten nach Schwere (`[{ts, info, warn, high}]`). Parameter: `from`, `to`, `bucket` (Länge eines Abschnitts in ms, Standard 1 h, höchstens 500 Abschnitte) sowie dieselben Filter wie `/api/anomalies` |
 | GET | `/api/anomalies/status` | Lernphase, Anzahl Gruppen und Host-Profile, letztes Fenster, Isolation Forest (Training, Schwelle, Score-Quantile), Beaconing (beobachtete Paare), Zähler der letzten 24 h |
 | GET | `/api/archives` | Historie (Größe, Zeitraum, `compressing`) und Archive mit `state` (`packed`, `unpacking`, `ready`, `failed`) |

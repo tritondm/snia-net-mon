@@ -14,6 +14,7 @@
 
 pub mod baseline;
 pub mod beacon;
+pub mod exceptions;
 mod engine;
 pub mod features;
 pub mod forest;
@@ -39,6 +40,9 @@ pub enum Error {
     Sqlite(rusqlite::Error),
     Join(tokio::task::JoinError),
     Config(String),
+    /// ungültige Eingabe aus der Web-UI
+    Invalid(String),
+    NotFound(String),
 }
 
 impl std::fmt::Display for Error {
@@ -46,7 +50,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Sqlite(e) => write!(f, "SQLite: {e}"),
             Error::Join(e) => write!(f, "Hintergrund-Task abgebrochen: {e}"),
-            Error::Config(msg) => f.write_str(msg),
+            Error::Config(msg) | Error::Invalid(msg) | Error::NotFound(msg) => f.write_str(msg),
         }
     }
 }
@@ -168,6 +172,22 @@ impl Anomaly {
     pub async fn timeline(&self, filter: EventFilter) -> Result<Vec<Bucket>, Error> {
         let engine = self.engine.clone();
         Ok(tokio::task::spawn_blocking(move || Self::lock(&engine).timeline(&filter, now_ms())).await??)
+    }
+
+    pub async fn exceptions(&self) -> Result<Vec<exceptions::ExceptionRow>, Error> {
+        let engine = self.engine.clone();
+        Ok(tokio::task::spawn_blocking(move || Self::lock(&engine).exceptions()).await??)
+    }
+
+    /// Ausnahme anlegen (`id = None`) oder ändern.
+    pub async fn save_exception(&self, id: Option<i64>, input: exceptions::ExceptionInput) -> Result<exceptions::ExceptionRow, Error> {
+        let engine = self.engine.clone();
+        tokio::task::spawn_blocking(move || Self::lock(&engine).save_exception(id, &input, now_ms())).await?
+    }
+
+    pub async fn delete_exception(&self, id: i64) -> Result<(), Error> {
+        let engine = self.engine.clone();
+        tokio::task::spawn_blocking(move || Self::lock(&engine).delete_exception(id, now_ms())).await?
     }
 
     pub async fn status(&self) -> Result<Status, Error> {
