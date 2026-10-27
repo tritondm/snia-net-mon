@@ -16,7 +16,7 @@ export const ui = $state({
   range: null,
   authRequired: false,
   // Vorbelegung für die Flow-Suche (z. B. Klick auf eine IP im Dashboard)
-  search: { ip: '', port: '' },
+  search: { ip: '', port: '', from: null, to: null },
   searchNonce: 0,
   // Datenquelle der Flow-Suche: '' = live, 'history' oder 'archive:<name>'; sourceInfo = { label, from, to }
   source: '',
@@ -28,10 +28,11 @@ export function windowMs() {
 }
 
 /** Zur Flow-Suche springen und dort sofort suchen (Klicks im Dashboard suchen immer in den Live-Daten). */
-export function searchFor({ ip = '', port = '' } = {}) {
+export function searchFor({ ip = '', port = '', from = null, to = null } = {}) {
   ui.source = '';
   ui.sourceInfo = null;
-  ui.search = { ip: String(ip), port: String(port) };
+  // from/to (Unix-ms): fester Zeitraum, z. B. der einer Auffälligkeit – sonst das gewählte Zeitfenster bis jetzt
+  ui.search = { ip: String(ip), port: String(port), from, to };
   ui.searchNonce += 1;
   ui.workspace = 'flows';
 }
@@ -40,7 +41,7 @@ export function searchFor({ ip = '', port = '' } = {}) {
 export function browseSource(source, info) {
   ui.source = source;
   ui.sourceInfo = info;
-  ui.search = { ip: '', port: '' };
+  ui.search = { ip: '', port: '', from: null, to: null };
   ui.searchNonce += 1;
   ui.workspace = 'flows';
 }

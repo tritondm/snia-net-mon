@@ -108,8 +108,8 @@
       lastNonce = ui.searchNonce;
       form.ip = ui.search.ip;
       form.port = ui.search.port;
-      form.from = '';
-      form.to = '';
+      form.from = ui.search.from ? toLocalInput(ui.search.from) : '';
+      form.to = ui.search.to ? toLocalInput(ui.search.to) : '';
       search();
     }
   });

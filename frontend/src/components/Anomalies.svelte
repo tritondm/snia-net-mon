@@ -7,7 +7,7 @@
   import { KINDS, SEVERITY, targetsOf } from '../lib/anomaly.js';
   import { api } from '../lib/api.js';
   import { searchFor } from '../lib/state.svelte.js';
-  import { fmtBytes, fmtDate, fmtNum, flag, geoTitle } from '../lib/format.js';
+  import { fmtBytes, fmtDate, fmtNum, flag, geoTitle, serviceName } from '../lib/format.js';
 
   let status = $state(null);
   let rows = $state([]);
@@ -144,6 +144,12 @@
   }
   const exceptionById = $derived(new Map(exceptions.map((x) => [x.id, x])));
 
+  // Flow-Suche im Zeitraum der Auffälligkeit (eine Minute Rand für spät exportierte Flows)
+  const windowLen = () => (status?.window_minutes ?? 10) * 60_000;
+  const eventRange = (r) => ({ from: (r.kind === 'beacon' && r.detail?.first_ms) || r.ts - windowLen(), to: r.last_ts + 60_000 });
+  // Zeitraum des Fensters, aus dem der Kontext einer Meldung stammt
+  const contextRange = (from) => ({ from, to: from + windowLen() + 60_000 });
+
   const hosts = $derived([...new Set(rows.map((r) => r.host))].sort((a, b) => cmp(ipKey(a), ipKey(b))));
   const fmtInterval = (s) => (s >= 90 ? `${(s / 60).toFixed(1)} min` : `${Math.round(s)} s`);
   const fmtTypical = (f) => (f.bytes ? fmtBytes(f.typical) : f.percent ? `${Math.round(f.typical * 100)} %` : fmtNum(f.typical));
@@ -161,6 +167,46 @@
   <div class="mt-0.5 grid grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] gap-x-4 tabular-nums">
     {#each ips ?? [] as ip}<div class="truncate" title={ip}>{@render ipText(ip, geo)}</div>{/each}
   </div>
+{/snippet}
+
+<!-- externe Gegenstellen eines Fensters; klick sucht die Flows mit dieser IP in genau diesem Fenster -->
+{#snippet peerList(peers, geo, from)}
+  <div class="mt-0.5 grid grid-cols-[repeat(auto-fill,minmax(22rem,1fr))] gap-x-4 tabular-nums">
+    {#each peers ?? [] as p}
+      <div class="truncate">
+        <button class="text-ctp-teal hover:underline" title="flows mit dieser ip in diesem fenster" onclick={() => searchFor({ ip: p.ip, ...contextRange(from) })}>{p.ip}</button
+        ><span class="text-ctp-overlay1">:{p.port}</span>
+        {#if geo?.[p.ip]}<span class="text-ctp-overlay1" title={geoTitle(geo[p.ip])}> {flag(geo[p.ip].cc)} {geo[p.ip].cc ?? ''}{geo[p.ip].org ? `, ${geo[p.ip].org}` : ''}</span
+          >{:else if p.cc}<span class="text-ctp-overlay1"> {flag(p.cc)} {p.cc}</span>{/if}
+        <span class="text-ctp-overlay0"> · {p.flows} flows · {fmtBytes(p.bytes)}↑</span>
+        {#if p.served}<span class="chip ml-1 !py-0 text-ctp-overlay1" title="die gegenstelle hat verbunden, der host hat nur geantwortet (er ist hier der server)">eingehend</span>{/if}
+      </div>
+    {/each}
+  </div>
+{/snippet}
+
+<!-- was der host im fenster getan hat: ziele, dienste, länder -->
+{#snippet hostContext(c, geo)}
+  {#if c}
+    <div class="mt-2 text-ctp-overlay1">
+      im fenster {fmtDate(c.from_ms)} – {fmtDate(c.from_ms + windowLen())}: {c.ext_peers} externe ziele · {c.int_peers} interne ziele · größte ziele:
+    </div>
+    {@render peerList(c.peers, geo, c.from_ms)}
+    {#if c.ports?.length}
+      <div class="mt-1 flex flex-wrap gap-1.5">
+        <span class="text-ctp-overlay1">ports:</span>
+        {#each c.ports as p}<span class="chip !py-0">{p.port}{serviceName(p.port) ? ` ${serviceName(p.port)}` : ''} <span class="text-ctp-overlay0">· {p.flows}</span></span>{/each}
+      </div>
+    {/if}
+    {#if c.countries?.length}
+      <div class="mt-1 flex flex-wrap gap-1.5">
+        <span class="text-ctp-overlay1">länder:</span>
+        {#each c.countries as k}<span class="chip !py-0 {k.opened ? '' : 'text-ctp-overlay0'}" title={k.opened ? '' : 'nur antworten an clients von dort'}
+            >{flag(k.cc)} {k.cc} <span class="text-ctp-overlay0">· {fmtBytes(k.bytes)}{k.opened ? '' : ' · eingehend'}</span></span
+          >{/each}
+      </div>
+    {/if}
+  {/if}
 {/snippet}
 
 <div class="grid grid-cols-1 gap-2.5">
@@ -322,7 +368,7 @@
               </td>
               <td><span class="chip !py-0 {kind.color}" title={kind.title}>{kind.label}</span></td>
               <td>
-                <button class="text-ctp-teal hover:underline" title="in der flow-suche öffnen" onclick={(e) => (e.stopPropagation(), searchFor({ ip: r.host }))}>{r.host}</button>
+                <button class="text-ctp-teal hover:underline" title="in der flow-suche öffnen" onclick={(e) => (e.stopPropagation(), searchFor({ ip: r.host, ...eventRange(r) }))}>{r.host}</button>
                 <button
                   class="ml-1 text-ctp-overlay0 hover:text-ctp-teal"
                   title="nur auffälligkeiten dieses hosts zeigen"
@@ -352,15 +398,22 @@
                         <span class="chip">{f.name} <span class="text-ctp-text">{fmtValue(f)}</span> · typisch {fmtTypical(f)} · z {f.z}</span>
                       {/each}
                     </div>
+                    {@render hostContext(r.detail.context, r.geo)}
                   {:else if r.kind === 'ml'}
-                    <div class="mb-1 text-ctp-overlay1">ml-score {r.detail.ml_score} – stärkste abweichungen vom median der trainingsdaten:</div>
+                    <div class="mb-1 text-ctp-overlay1">
+                      ml-score {r.detail.ml_score} – stärkste abweichungen vom median aller hosts{r.detail.slot ? ` · eigenes profil: ${r.detail.slot}` : ''}:
+                    </div>
                     <div class="flex flex-wrap gap-2">
                       {#each r.detail.deviations ?? [] as d}
-                        <span class="chip">{d.name} <span class="text-ctp-text">{fmtValue(d)}</span> · typisch {fmtTypical(d)}</span>
+                        <span class="chip"
+                          >{d.name} <span class="text-ctp-text">{fmtValue(d)}</span> · alle hosts {fmtTypical(d)}{#if d.own_typical != null}
+                            · eigenes profil {fmtTypical({ ...d, typical: d.own_typical })} (z {d.own_z}){/if}</span
+                        >
                       {:else}
                         <span class="text-ctp-overlay0">keine einzelne kennzahl sticht heraus – die kombination (auch mit der uhrzeit) ist ungewöhnlich</span>
                       {/each}
                     </div>
+                    {@render hostContext(r.detail.context, r.geo)}
                   {:else if r.kind === 'scan'}
                     <div>{r.detail.attempts} versuche · {r.detail.hosts} ziel-hosts · {r.detail.ports} ports</div>
                     <div class="mt-1 text-ctp-overlay1">ports: {(r.detail.sample_ports ?? []).join(', ')}</div>
@@ -392,9 +445,15 @@
                     <div class="mt-1 text-ctp-overlay0">nur ein hinweis: auch updates, push-dienste oder geräte, die ihren status melden, verbinden sich regelmäßig</div>
                   {:else if r.kind === 'country'}
                     <div>{flag(r.detail.cc)} {r.detail.cc} · {fmtBytes(r.detail.bytes)} hochgeladen im ersten fenster</div>
+                    {#if r.detail.peers?.length}
+                      <div class="mt-1 text-ctp-overlay1">ziele in {r.detail.cc}{r.detail.peer_count > r.detail.peers.length ? ` (${r.detail.peers.length} von ${r.detail.peer_count})` : ''}:</div>
+                      {@render peerList(r.detail.peers, r.geo, r.detail.from_ms)}
+                    {:else}
+                      <div class="mt-1 text-ctp-overlay0">ziel-ips wurden für diese ältere meldung nicht gespeichert</div>
+                    {/if}
                   {/if}
                   <div class="mt-2 flex flex-wrap items-center gap-3 text-ctp-overlay0">
-                    <span>zuletzt {fmtDate(r.last_ts)} · klick auf die ip öffnet die flow-suche</span>
+                    <span>zuletzt {fmtDate(r.last_ts)} · klick auf eine ip öffnet die flow-suche für diesen zeitraum</span>
                     {#if r.exception_id && exceptionById.has(r.exception_id)}
                       <button class="chip hover:text-ctp-text" onclick={() => editException(exceptionById.get(r.exception_id))}>ausnahme #{r.exception_id} bearbeiten…</button>
                     {:else}
