@@ -431,6 +431,13 @@ Upload-Anteil. Gezeigt werden die bis zu drei Merkmale mit `r_d > 2`; die Zeitme
 gefundenen Abweichungen **nach unten** (der Host war nur ruhiger als sonst), wird nichts gemeldet. Findet sich kein
 einzelnes Merkmal, lautet der Text „kombination aus uhrzeit und werten“.
 
+Der Wald vergleicht mit *allen* Hosts. Ein Arbeitsplatz mit 190 Zielen in 12 Ländern ist dort selten, weil die meisten
+Fenster von ruhigen Geräten stammen. Für diesen Host ist es aber normal. Hat der Host ein eigenes Profil (Host oder
+Gruppe zur selben Zeit, wie bei der Statistik), wird ein ML-Treffer deshalb nur gemeldet, wenn mindestens ein Merkmal
+auch dort `z ≥ 2` erreicht. Die Meldung zeigt je Merkmal beide Vergleichswerte („alle hosts“ und „eigenes profil“) und
+dazu, wie bei der Statistik, den Kontext des Fensters: die größten externen Ziele mit Port, Flows und Upload, die
+häufigsten Ports und die Länder. Ein Klick auf eine IP öffnet die Flow-Suche für genau dieses Fenster.
+
 #### Zusammenspiel mit der Statistik
 
 | Statistik | Isolation Forest | Ergebnis |
@@ -462,9 +469,11 @@ aus. Die Meldung nennt Versuche, Hosts, Ports und einen Auszug der Ziele. Schwer
 extern auf). Geräte, die den Schul- oder Firmen-DNS umgehen, umgehen oft auch dessen Filter; manche Schadsoftware
 nutzt eigene Resolver. DNS over HTTPS (Port 443) ist so nicht erkennbar. Schwere **warnung**.
 
-**Neues Land.** Je Netzgruppe merkt sich `anomaly.db` die Menge `C_g` aller Länder, in die jemals hochgeladen wurde
-(Länder aus `out`-Flows). Ein Land, das neu in `C_g` kommt, wird gemeldet, sobald die Lernphase vorbei ist; in der
-Lernphase wird nur gesammelt. Diese Meldungen werden nicht zusammengefasst – jedes neue Land ist ein eigenes Ereignis.
+**Neues Land.** Je Netzgruppe merkt sich `anomaly.db` die Menge `C_g` aller Länder, zu denen ein Host der Gruppe selbst
+eine Verbindung geöffnet hat (Länder aus `out`-Flows). Antworten eines Servers zählen nicht: Ruft ein Client aus Spanien
+den Webserver auf Port 8080 auf, sind die Antworten zwar `out`-Flows nach ES, aber keine eigene Verbindung (Quellport
+kleiner als Zielport). Ein Land, das neu in `C_g` kommt, wird gemeldet, sobald die Lernphase vorbei ist; in der
+Lernphase wird nur gesammelt. Die Meldung nennt die Ziele in diesem Land (IP, Port, Flows, Upload). Diese Meldungen werden nicht zusammengefasst – jedes neue Land ist ein eigenes Ereignis.
 Schwere **info**.
 
 ### 4. Beaconing
@@ -481,7 +490,9 @@ Verbindungen der letzten **12 Stunden** (höchstens 512 je Paar, höchstens 300.
 derselben Startzeit sind dieselbe Verbindung (Active Timeout) und zählen einmal.
 
 Nicht beobachtet werden Ausnahmen aus der Konfiguration: Zielports aus `beacon_allow_ports` (Standard 123, NTP – Zeit-Sync
-ist von Natur aus regelmäßig), Hosts oder Ziele aus `beacon_allow` und Ziele in Anbietern aus `beacon_allow_asn`.
+ist von Natur aus regelmäßig), Hosts oder Ziele aus `beacon_allow` und Ziele in Anbietern aus `beacon_allow_asn`. DNS (53, 853) zu erlaubten Resolvern
+(`dns_servers`) und von eigenen DNS-Servern (`dns_clients`) wird ebenfalls nicht beobachtet – ein Resolver fragt die
+Root- und Domain-Server naturgemäß ständig ab.
 
 #### Ist das Muster regelmäßig?
 

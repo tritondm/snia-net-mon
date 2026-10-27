@@ -4,6 +4,7 @@ use crate::AnomalyConfig;
 use crate::baseline::{Baselines, SlotKind};
 use crate::beacon::{self, Finding, Tracker};
 use crate::exceptions::{ExceptionInput, ExceptionRow, Exceptions, Subject};
+use crate::baseline::Profile;
 use crate::features::{FEATURES, HostWindow, NAMES, PolicyHit, Window, is_bytes};
 use crate::forest::{self, Forest, Rng, SHARE, TIME, Vector};
 use crate::store::{Bucket, Counts, Event, EventFilter, EventRow, Kind, Severity, Store};
@@ -22,6 +23,11 @@ const MERGE_GAP_MS: i64 = HOUR_MS;
 const VECTORS_PER_WINDOW: usize = 100;
 /// So viele Ziel-IPs speichert eine Meldung (Portscan, Netz-Regel) als Auszug
 const SAMPLE_IPS: usize = 50;
+/// So viele Gegenstellen, Ports und Länder nennt eine Meldung als Kontext.
+const CONTEXT_TOP: usize = 10;
+/// Ein ML-Treffer wird nur gemeldet, wenn mindestens ein Merkmal auch gegenüber dem eigenen Profil (Host bzw. Gruppe)
+/// so weit erhöht ist. Sonst ist das Muster für diesen Host normal und nur im Vergleich mit allen Hosts selten.
+const ML_MIN_Z: f64 = 2.0;
 /// Mindestzahl an Trainingsvektoren für den Isolation Forest.
 pub const MIN_TRAIN: usize = 1000;
 
@@ -238,9 +244,11 @@ impl Engine {
                 let log = raw.map(f64::ln_1p);
                 let mut hits = Vec::new();
                 let mut slot = None;
+                let mut own: Option<Profile> = None;
                 let host_key = (self.cfg.host_profiles && !self.cfg.dynamic_networks.contains(*ip)).then_some(host.as_str());
                 if learned && let Some((kind, profile)) = self.baselines.reference(&group, host_key, lt.week_slot) {
                     slot = Some(kind);
+                    own = Some(*profile);
                     for f in 0..FEATURES {
                         let z = profile[f].z(log[f]);
                         if z >= self.cfg.z_threshold && raw[f] >= self.cfg.minimums[f] {
@@ -252,10 +260,13 @@ impl Engine {
                 let v = forest::vector(&log, h, lt.hour, lt.weekend);
                 let ml = self.model.as_ref().map(|m| (m.forest.score(&v), m));
                 if !hits.is_empty() {
-                    found.push(stat_event(end, &host, &group, hits, slot, ml.map(|(s, m)| (s, m.threshold)), &self.cfg));
+                    let mut event = stat_event(end, &host, &group, hits, slot, ml.map(|(s, m)| (s, m.threshold)), &self.cfg);
+                    event.detail["context"] = context(h, &window, window.start_ms);
+                    found.push(event);
                 } else if let Some((score, model)) = ml.filter(|(s, m)| *s >= m.threshold)
-                    && let Some(event) = ml_event(end, &host, &group, score, &v, model, slot)
+                    && let Some(mut event) = ml_event(end, &host, &group, score, &v, &log, model, slot.zip(own.as_ref()))
                 {
+                    event.detail["context"] = context(h, &window, window.start_ms);
                     found.push(event);
                 }
                 vectors.push(v);
@@ -273,21 +284,13 @@ impl Engine {
                     .collect();
                 found.push(dns_event(end, &host, &group, if open.is_empty() { all } else { open }));
             }
-            for (cc, bytes) in &h.countries {
+            // Länder, die der Host nur als Server beantwortet hat (Clients von dort), lernt die Gruppe nicht – sonst bliebe
+            // eine spätere eigene Verbindung dorthin unbemerkt
+            for (cc, c) in h.countries.iter().filter(|(_, c)| c.opened) {
                 if self.countries.entry(group.clone()).or_default().insert(cc.clone()) {
                     self.store.add_country(&group, cc, end)?;
                     if learned && self.cfg.new_country {
-                        found.push(Event {
-                            ts: end,
-                            host: host.clone(),
-                            group: group.clone(),
-                            kind: Kind::Country,
-                            tag: cc.clone(),
-                            severity: Severity::Info,
-                            score: *bytes as f64,
-                            title: format!("erste verbindung der gruppe {group} nach {cc} ({} hochgeladen)", fmt_bytes(*bytes as f64)),
-                            detail: json!({ "cc": cc, "bytes": bytes }),
-                        });
+                        found.push(country_event(end, &host, &group, cc, c.bytes, h, &window));
                     }
                 }
             }
@@ -506,12 +509,25 @@ fn stat_event(ts: i64, host: &str, group: &str, mut hits: Vec<Hit>, slot: Option
 }
 
 /// ML-Treffer als Auffälligkeit – außer der Host war nur *ruhiger* als üblich (alle auffälligen Merkmale unter dem
-/// Typischen): Das ist für die Sicherheit uninteressant.
-fn ml_event(ts: i64, host: &str, group: &str, score: f64, v: &Vector, model: &Model, slot: Option<SlotKind>) -> Option<Event> {
+/// Typischen): Das ist für die Sicherheit uninteressant. Ebenso, wenn kein Merkmal über dem eigenen Profil (Host bzw.
+/// Gruppe zur selben Zeit) liegt: Dann ist der Host nur anders als die meisten, aber so wie immer.
+#[allow(clippy::too_many_arguments)]
+fn ml_event(ts: i64, host: &str, group: &str, score: f64, v: &Vector, log: &[f64; FEATURES], model: &Model, own: Option<(SlotKind, &Profile)>) -> Option<Event> {
     let deviations = explain(v, model);
     if !deviations.is_empty() && deviations.iter().all(|d| d.1 < d.2) {
         return None;
     }
+    if let Some((_, profile)) = own
+        && (0..FEATURES).all(|f| profile[f].z(log[f]) < ML_MIN_Z)
+    {
+        return None;
+    }
+    let slot = own.map(|(kind, _)| kind);
+    // je Merkmal der typische Wert im eigenen Profil (nicht beim Upload-Anteil, den kennt die Baseline nicht)
+    let own_typical = |name: &str| {
+        let f = NAMES.iter().position(|n| *n == name)?;
+        own.map(|(_, p)| (p[f].mean.exp_m1().max(0.0), round2(p[f].z(log[f]))))
+    };
     let names: Vec<&str> = deviations.iter().map(|d| d.0).collect();
     let reason = if names.is_empty() { "kombination aus uhrzeit und werten".to_string() } else { format!("auffällig: {}", names.join(", ")) };
     Some(Event {
@@ -525,9 +541,13 @@ fn ml_event(ts: i64, host: &str, group: &str, score: f64, v: &Vector, model: &Mo
         title: format!("ungewöhnliches gesamtmuster (ml-score {score:.2}) – {reason}"),
         detail: json!({
             "ml_score": round2(score),
-            "deviations": deviations.iter().map(|(name, value, typical, kind)| json!({
-                "name": name, "value": value, "typical": typical, "bytes": *kind == "bytes", "percent": *kind == "percent",
-            })).collect::<Vec<_>>(),
+            "deviations": deviations.iter().map(|(name, value, typical, kind)| {
+                let own = own_typical(name);
+                json!({
+                    "name": name, "value": value, "typical": typical, "bytes": *kind == "bytes", "percent": *kind == "percent",
+                    "own_typical": own.map(|o| o.0), "own_z": own.map(|o| o.1),
+                })
+            }).collect::<Vec<_>>(),
             "slot": slot.map(SlotKind::name),
         }),
     })
@@ -554,6 +574,66 @@ fn explain(v: &Vector, m: &Model) -> Vec<(&'static str, f64, f64, &'static str)>
             }
         })
         .collect()
+}
+
+/// Was der Host im Fenster getan hat: die größten externen Gegenstellen, Dienste und Länder – damit eine Meldung ohne
+/// Flow-Suche einzuordnen ist. `from_ms` ist der Beginn des Fensters (für die Flow-Suche).
+fn context(h: &HostWindow, window: &Window, from_ms: i64) -> serde_json::Value {
+    let mut peers: Vec<_> = h.ext_peers.iter().collect();
+    peers.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes).then(b.1.flows.cmp(&a.1.flows)).then(a.0.cmp(b.0)));
+    let mut ports: Vec<_> = h.ports.iter().collect();
+    ports.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let mut countries: Vec<_> = h.countries.iter().collect();
+    countries.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes).then(a.0.cmp(b.0)));
+    json!({
+        "from_ms": from_ms,
+        "ext_peers": h.ext_peers.len(),
+        "int_peers": h.int_peers.len(),
+        "peers": peers.iter().take(CONTEXT_TOP).map(|(ip, p)| peer_json(ip, p, window)).collect::<Vec<_>>(),
+        "ports": ports.iter().take(CONTEXT_TOP).map(|(port, flows)| json!({ "port": port, "flows": flows })).collect::<Vec<_>>(),
+        "countries": countries.iter().take(CONTEXT_TOP).map(|(cc, c)| json!({ "cc": cc, "bytes": c.bytes, "opened": c.opened })).collect::<Vec<_>>(),
+    })
+}
+
+fn peer_json(ip: &IpAddr, p: &crate::features::PeerUse, window: &Window) -> serde_json::Value {
+    json!({
+        "ip": ip.to_string(), "port": p.port, "flows": p.flows, "bytes": p.bytes, "served": p.served,
+        "cc": window.peers.get(ip).and_then(|i| i.cc.clone()),
+    })
+}
+
+/// Erste Verbindung der Gruppe in ein Land, mit den Zielen dort.
+fn country_event(ts: i64, host: &str, group: &str, cc: &str, bytes: u64, h: &HostWindow, window: &Window) -> Event {
+    let mut peers: Vec<_> =
+        h.ext_peers.iter().filter(|(ip, _)| window.peers.get(ip).and_then(|i| i.cc.as_deref()) == Some(cc)).collect();
+    // selbst geöffnete Verbindungen zuerst, dann nach Volumen
+    peers.sort_by(|a, b| a.1.served.cmp(&b.1.served).then(b.1.bytes.cmp(&a.1.bytes)).then(a.0.cmp(b.0)));
+    let target = match peers.first() {
+        Some((ip, p)) if peers.len() > 1 => format!(": {} · +{} weitere ziele", fmt_peer(ip, p.port), peers.len() - 1),
+        Some((ip, p)) => format!(": {}", fmt_peer(ip, p.port)),
+        None => String::new(),
+    };
+    Event {
+        ts,
+        host: host.into(),
+        group: group.into(),
+        kind: Kind::Country,
+        tag: cc.into(),
+        severity: Severity::Info,
+        score: bytes as f64,
+        title: format!("erste verbindung der gruppe {group} nach {cc}{target} ({} hochgeladen)", fmt_bytes(bytes as f64)),
+        detail: json!({
+            "cc": cc,
+            "bytes": bytes,
+            "from_ms": window.start_ms,
+            "peers": peers.iter().take(CONTEXT_TOP).map(|(ip, p)| peer_json(ip, p, window)).collect::<Vec<_>>(),
+            "peer_count": peers.len(),
+        }),
+    }
+}
+
+fn fmt_peer(ip: &IpAddr, port: u16) -> String {
+    if ip.is_ipv6() { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") }
 }
 
 fn scan_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
@@ -845,6 +925,7 @@ mod tests {
         assert!(upload.title.starts_with("upload 2.0 GiB statt typisch"), "{}", upload.title);
         assert_eq!(upload.group, "10.0.1.0/24");
         assert!(upload.detail["ml_score"].as_f64().is_some(), "zweite Meinung fehlt: {}", upload.detail);
+        assert_eq!(upload.detail["context"]["peers"][0]["ip"], "198.51.100.9", "größtes Ziel im Kontext: {}", upload.detail);
         let scan = by("10.0.1.11", Kind::Scan).expect("Portscan erwartet");
         assert_eq!((scan.severity, scan.detail["hosts"].as_u64()), (Severity::High, Some(150)));
         assert!(by("10.0.1.12", Kind::Dns).is_some());
@@ -945,6 +1026,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    #[test]
+    fn new_country_needs_an_own_connection_and_names_the_target() {
+        let cfg = config("country");
+        let path = cfg.db_path.clone();
+        let mut engine = Engine::open(cfg, 0).unwrap();
+        let mut w = Window::new(0, true);
+        let ip: IpAddr = "10.0.1.200".parse().unwrap();
+        let host = w.hosts.entry(ip).or_default();
+        // nur Antworten an einen Client in ES (Server), aber eine eigene Verbindung nach FR
+        host.countries.insert("ES".into(), crate::features::CountryUse { bytes: 9000, opened: false });
+        host.countries.insert("FR".into(), crate::features::CountryUse { bytes: 500, opened: true });
+        let peer: IpAddr = "198.51.100.7".parse().unwrap();
+        host.ext_peers.insert(peer, crate::features::PeerUse { flows: 2, bytes: 500, port: 443, served: false });
+        w.peers.insert(peer, beacon::PeerInfo { cc: Some("FR".into()), ..Default::default() });
+        let created = engine.finish_window(w, 600_000).unwrap();
+        let countries: Vec<&Event> = created.iter().filter(|e| e.kind == Kind::Country).collect();
+        assert_eq!(countries.len(), 1, "{created:?}");
+        assert_eq!(countries[0].title, "erste verbindung der gruppe 10.0.1.0/24 nach FR: 198.51.100.7:443 (500 B hochgeladen)");
+        assert_eq!(countries[0].detail["peers"][0]["ip"], "198.51.100.7");
+        assert!(!engine.countries["10.0.1.0/24"].contains("ES"), "nur beantwortete Länder werden nicht gelernt");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
     fn by_kind(events: &[Event], kind: Kind) -> Option<&Event> {
         events.iter().find(|e| e.kind == kind)
     }
@@ -957,7 +1061,7 @@ mod tests {
         let mut w = Window::new(0, false);
         let host = w.hosts.entry("10.0.1.10".parse().unwrap()).or_default();
         host.bytes_up = 50 * 1024 * MIB;
-        host.countries.insert("CN".into(), 5 * MIB);
+        host.countries.insert("CN".into(), crate::features::CountryUse { bytes: 5 * MIB, opened: true });
         host.dns.insert("8.8.8.8".parse().unwrap(), 3);
         let created = engine.finish_window(w, 600_000).unwrap();
         assert_eq!(created.iter().map(|e| e.kind).collect::<Vec<_>>(), vec![Kind::Dns]);

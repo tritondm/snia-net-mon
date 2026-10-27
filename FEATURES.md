@@ -433,6 +433,13 @@ upload share. Up to three features with `r_d > 2` are shown; the time features a
 deviations found point **downwards** (the host was merely quieter than usual), nothing is reported. If no single
 feature stands out, the text reads "kombination aus uhrzeit und werten" (combination of time of day and values).
 
+The forest compares with *all* hosts. A workstation with 190 destinations in 12 countries is rare there, because most
+windows come from quiet devices, yet it is normal for that host. If the host has a profile of its own (host or group at
+the same time, as for the statistics), an ML hit is therefore only reported if at least one feature also reaches `z ≥ 2`
+there. The report shows both reference values per feature ("alle hosts" and "eigenes profil") plus, as for statistical
+hits, the context of the window: the largest external destinations with port, flows and upload, the most frequent
+ports and the countries. Clicking an IP opens the flow search for exactly that window.
+
 #### Interplay with the statistics
 
 | Statistics | Isolation Forest | Result |
@@ -464,9 +471,11 @@ anything. The report lists attempts, hosts, ports and a sample of the targets. S
 themselves). Devices that bypass the school's or company's DNS often bypass its filters too; some malware uses its own
 resolvers. DNS over HTTPS (port 443) cannot be detected this way. Severity **warn**.
 
-**New country.** Per network group, `anomaly.db` remembers the set `C_g` of all countries ever uploaded to (countries of
-`out` flows). A country that is new to `C_g` is reported once the learning phase is over; during the learning phase they
-are only collected. These reports are not merged – each new country is an event of its own. Severity **info**.
+**New country.** Per network group, `anomaly.db` remembers the set `C_g` of all countries a host of the group has opened
+a connection to itself (countries of `out` flows). Replies of a server do not count: if a client in Spain calls the web
+server on port 8080, the replies are `out` flows to ES, but not a connection of the server's own (source port lower
+than destination port). A country that is new to `C_g` is reported once the learning phase is over; during the learning
+phase they are only collected. The report names the destinations in that country (IP, port, flows, upload). These reports are not merged – each new country is an event of its own. Severity **info**.
 
 ### 4. Beaconing
 
@@ -483,7 +492,8 @@ records with the same start time are the same connection (active timeout) and co
 
 Exceptions from the configuration are not observed: destination ports from `beacon_allow_ports` (default 123, NTP – time
 sync is regular by nature), hosts or destinations from `beacon_allow` and destinations in providers from
-`beacon_allow_asn`.
+`beacon_allow_asn`. DNS (53, 853) to allowed resolvers (`dns_servers`) and from your own DNS servers (`dns_clients`) is
+not observed either – a resolver queries root and domain servers all the time by nature.
 
 #### Is the pattern regular?
 

@@ -113,9 +113,11 @@ scan_threshold = 100
 dns_rule = true
 dns_servers = []
 # Interne Hosts oder Netze, die selbst extern auflösen dürfen: eigene DNS-Server, Domain-Controller, Router/Firewalls
-# mit DNS-Weiterleitung. Alle anderen Erkennungen bleiben für sie aktiv (anders als bei ignore).
+# mit DNS-Weiterleitung. Ihre DNS-Anfragen zählen auch nicht als Beaconing; alle anderen Erkennungen bleiben für sie
+# aktiv (anders als bei ignore).
 dns_clients = []
-# Erste Verbindung einer Netzgruppe in ein Land, das sie bisher nie kontaktiert hat (braucht GeoIP).
+# Erste Verbindung einer Netzgruppe in ein Land, das sie bisher nie kontaktiert hat (braucht GeoIP). Antworten eigener
+# Server an Clients aus dem Ausland zählen nicht.
 new_country = true
 
 # Beaconing: regelmäßige Verbindungen eines Hosts zum selben externen Ziel. Nur als info in der Web-UI, nie per Mail.

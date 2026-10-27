@@ -40,16 +40,42 @@ pub struct HostWindow {
     pub bytes_down: u64,
     /// Flows, die der Host selbst sendet (`out` und `internal`)
     pub flows: u64,
-    pub ext_peers: HashSet<IpAddr>,
+    /// externe Gegenstellen mit Flows und Bytes – für die Merkmale zählt nur die Anzahl, der Rest erklärt Meldungen
+    pub ext_peers: HashMap<IpAddr, PeerUse>,
     pub int_peers: HashSet<IpAddr>,
-    /// Dienste: jeweils der kleinere der beiden Ports, wie in Top Ports und Sankey
-    pub ports: HashSet<u16>,
-    /// Ländercode → hochgeladene Bytes
-    pub countries: HashMap<String, u64>,
+    /// Dienste (jeweils der kleinere der beiden Ports, wie in Top Ports und Sankey) → Flows
+    pub ports: HashMap<u16, u64>,
+    /// Ländercode → hochgeladene Bytes und ob der Host selbst eine Verbindung dorthin geöffnet hat
+    pub countries: HashMap<String, CountryUse>,
     /// Fehlgeschlagene TCP-Verbindungsversuche (SYN ohne ACK): Ziel und Port
     pub probes: HashSet<(IpAddr, u16)>,
     /// DNS (53, 853) an nicht erlaubte externe Resolver: Resolver → Flows
     pub dns: HashMap<IpAddr, u64>,
+}
+
+/// Verkehr eines Hosts zu einer externen Gegenstelle in einem Fenster.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PeerUse {
+    pub flows: u64,
+    /// hochgeladene Bytes
+    pub bytes: u64,
+    /// Dienst-Port des ersten Flows
+    pub port: u16,
+    /// `true`, solange der Host nur geantwortet hat (er ist der Server, die Gegenstelle der Client)
+    pub served: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CountryUse {
+    pub bytes: u64,
+    /// mindestens eine Verbindung hat der Host selbst geöffnet (nicht nur Antworten als Server)
+    pub opened: bool,
+}
+
+/// Antwort eines Servers: TCP/UDP vom Dienst-Port (kleiner) zum Client-Port (größer). Bei anderen Protokollen gilt der
+/// Absender als Initiator.
+pub fn is_reply(flow: &FlowRecord) -> bool {
+    matches!(flow.proto, 6 | 17) && flow.src_port < flow.dst_port
 }
 
 impl HostWindow {
@@ -148,8 +174,9 @@ impl Window {
             return;
         }
         h.flows += 1;
-        if h.ports.len() < SET_CAP {
-            h.ports.insert(flow.src_port.min(flow.dst_port));
+        let port = flow.src_port.min(flow.dst_port);
+        if h.ports.len() < SET_CAP || h.ports.contains_key(&port) {
+            *h.ports.entry(port).or_default() += 1;
         }
         // SYN ohne ACK: Verbindungsversuch, der nie zustande kam (typisch für Portscans)
         if flow.proto == 6 && flow.tcp_flags & 0x02 != 0 && flow.tcp_flags & 0x10 == 0 && h.probes.len() < SET_CAP {
@@ -162,10 +189,18 @@ impl Window {
             return;
         }
         h.bytes_up = h.bytes_up.saturating_add(flow.bytes);
-        if h.ext_peers.len() < SET_CAP {
-            h.ext_peers.insert(peer);
+        let reply = is_reply(flow);
+        if h.ext_peers.len() < SET_CAP || h.ext_peers.contains_key(&peer) {
+            let p = h.ext_peers.entry(peer).or_insert(PeerUse { port, served: true, ..Default::default() });
+            p.flows += 1;
+            p.bytes = p.bytes.saturating_add(flow.bytes);
+            p.served &= reply;
         }
-        if matches!(flow.proto, 6 | 17) && matches!(flow.dst_port, 53 | 853) && !filters.dns_servers.contains(peer) && !filters.dns_clients.contains(host) {
+        // eigene DNS-Server fragen extern regelmäßig nach, ebenso jeder Host einen erlaubten Resolver: kein Beaconing
+        let allowed_dns = matches!(flow.proto, 6 | 17)
+            && matches!(flow.dst_port, 53 | 853)
+            && (filters.dns_servers.contains(peer) || filters.dns_clients.contains(host));
+        if matches!(flow.proto, 6 | 17) && matches!(flow.dst_port, 53 | 853) && !allowed_dns {
             *h.dns.entry(peer).or_default() += 1;
         }
         let info = self.peers.entry(peer).or_insert_with(|| {
@@ -173,7 +208,9 @@ impl Window {
             PeerInfo { cc: g.cc, asn: g.asn, org: g.org }
         });
         if let Some(cc) = &info.cc {
-            *h.countries.entry(cc.clone()).or_default() += flow.bytes;
+            let c = h.countries.entry(cc.clone()).or_default();
+            c.bytes = c.bytes.saturating_add(flow.bytes);
+            c.opened |= !reply;
         }
         // Beaconing: nur die Anfrage-Richtung (Zielport ist der Dienst), ohne Ausnahmen aus der Konfiguration
         let b = &filters.beacon;
@@ -181,6 +218,7 @@ impl Window {
             && matches!(flow.proto, 6 | 17)
             && flow.dst_port < flow.src_port
             && self.beacon_entries < BEACON_CAP
+            && !allowed_dns
             && !b.allow_ports.contains(&flow.dst_port)
             && !b.allow.contains(host)
             && !b.allow.contains(peer)
@@ -237,12 +275,28 @@ mod tests {
         assert_eq!(w.hosts.len(), 1);
         let h = &w.hosts[&"192.168.1.10".parse().unwrap()];
         assert_eq!(h.values(), [1220.0, 90_000.0, 5.0, 4.0, 1.0, 4.0, 0.0]);
+        assert_eq!(h.ext_peers[&"203.0.113.5".parse().unwrap()].flows, 1);
         assert_eq!(h.probes.len(), 1);
         assert_eq!(h.dns.len(), 1, "nur der nicht erlaubte Resolver");
         assert!((h.upload_share() - 1220.0 / 91_220.0).abs() < 1e-9);
-        // Beaconing: ausgehende Anfragen (443, 22, 53, 53), nicht der ignorierte Host
-        assert_eq!(w.beacons.len(), 4);
+        // Beaconing: ausgehende Anfragen (443, 22, 53), nicht der erlaubte Resolver und nicht der ignorierte Host
+        assert_eq!(w.beacons.len(), 3);
         assert!(w.beacons.contains_key(&("192.168.1.10".parse().unwrap(), "203.0.113.5".parse().unwrap(), 443, 6)));
+    }
+
+    #[test]
+    fn server_replies_are_marked_as_served() {
+        let geo = GeoLookup::disabled();
+        let mut w = Window::new(0, false);
+        // Server 192.168.1.200:8080 antwortet einem externen Client, öffnet aber selbst eine Verbindung zu einem anderen Ziel
+        w.add(&flow("198.51.100.7", "192.168.1.200", 50000, 8080, 300, 0x1b, Direction::In), &Filters::default(), &geo);
+        w.add(&flow("192.168.1.200", "198.51.100.7", 8080, 50000, 9000, 0x1b, Direction::Out), &Filters::default(), &geo);
+        w.add(&flow("192.168.1.200", "203.0.113.5", 50001, 443, 500, 0x1b, Direction::Out), &Filters::default(), &geo);
+        let h = &w.hosts[&"192.168.1.200".parse().unwrap()];
+        let client = h.ext_peers[&"198.51.100.7".parse().unwrap()];
+        assert!(client.served && client.port == 8080 && client.bytes == 9000);
+        assert!(!h.ext_peers[&"203.0.113.5".parse().unwrap()].served);
+        assert_eq!(w.beacons.len(), 1, "Antworten sind keine Verbindungen des Hosts");
     }
 
     #[test]
@@ -253,6 +307,7 @@ mod tests {
         w.add(&flow("192.168.1.53", "198.41.0.4", 50000, 53, 80, 0, Direction::Out), &filters, &geo);
         w.add(&flow("192.168.1.10", "8.8.8.8", 50000, 53, 80, 0, Direction::Out), &filters, &geo);
         assert!(w.hosts[&"192.168.1.53".parse().unwrap()].dns.is_empty(), "eigener DNS-Server darf extern auflösen");
+        assert!(!w.beacons.keys().any(|k| k.0 == "192.168.1.53".parse::<IpAddr>().unwrap()), "und ist kein Beaconing");
         assert_eq!(w.hosts[&"192.168.1.10".parse().unwrap()].dns.len(), 1);
     }
 
