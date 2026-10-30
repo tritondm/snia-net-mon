@@ -8,6 +8,7 @@ export const KINDS = {
   country: { label: 'neues land', color: 'text-ctp-sapphire border-ctp-sapphire/50', title: 'erste Verbindung der Gruppe in dieses Land' },
   policy: { label: 'netz-regel', color: 'text-ctp-pink border-ctp-pink/50', title: 'Verstoß gegen eine Netz-Regel aus [anomaly] rules' },
   beacon: { label: 'beaconing', color: 'text-ctp-lavender border-ctp-lavender/50', title: 'regelmäßige Verbindungen zum selben externen Ziel' },
+  drift: { label: 'schleichend', color: 'text-ctp-flamingo border-ctp-flamingo/50', title: 'Upload über viele Fenster leicht erhöht (CUSUM)' },
 };
 
 export const SEVERITY = {
@@ -25,6 +26,7 @@ export const TARGET_HINT = {
   stat: null,
   ml: null,
   scan: null,
+  drift: null,
 };
 
 /** Mögliche Ziele einer Auffälligkeit für den Ausnahme-Dialog, das wahrscheinlichste zuerst. */

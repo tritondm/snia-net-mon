@@ -187,6 +187,11 @@ struct AnomalySection {
     beacon_allow: Vec<String>,
     beacon_allow_asn: Vec<u32>,
     beacon_allow_ports: Vec<u16>,
+    /// Schleichender Anstieg des Uploads (CUSUM)
+    drift: bool,
+    drift_k: f64,
+    drift_h: f64,
+    drift_min_mb: f64,
 }
 
 impl Default for AnomalySection {
@@ -235,6 +240,10 @@ impl Default for AnomalySection {
             beacon_allow: Vec::new(),
             beacon_allow_asn: Vec::new(),
             beacon_allow_ports: d.beacon.allow_ports.iter().copied().collect(),
+            drift: d.drift.enabled,
+            drift_k: d.drift.k,
+            drift_h: d.drift.h,
+            drift_min_mb: d.drift.min_excess / mib,
         }
     }
 }
@@ -306,6 +315,12 @@ impl AnomalySection {
                 allow: nets("beacon_allow", &self.beacon_allow)?,
                 allow_asn: self.beacon_allow_asn.iter().copied().collect(),
                 allow_ports: self.beacon_allow_ports.iter().copied().collect(),
+            },
+            drift: anomaly::drift::DriftConfig {
+                enabled: self.drift,
+                k: self.drift_k.clamp(0.0, 5.0),
+                h: self.drift_h.clamp(1.0, 1000.0),
+                min_excess: self.drift_min_mb.max(0.0) * mib,
             },
         })
     }

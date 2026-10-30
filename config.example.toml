@@ -133,6 +133,15 @@ beacon_allow = []
 beacon_allow_asn = []
 beacon_allow_ports = [123]
 
+# Schleichender Anstieg (CUSUM): Ein Host lädt über Stunden nur leicht mehr hoch als sonst – in keinem einzelnen
+# Fenster genug für die Statistik, in Summe aber ein Datenabfluss. Je Fenster wird min(z, z_threshold) - drift_k
+# aufsummiert (nie unter 0); gemeldet wird ab der Summe drift_h, wenn seit Beginn des Anstiegs mindestens
+# drift_min_mb mehr als typisch hochgeladen wurden. Kleineres drift_k / drift_h = empfindlicher, aber mehr Meldungen.
+drift = true
+drift_k = 0.5
+drift_h = 10.0
+drift_min_mb = 250
+
 # Isolation Forest als zweite Meinung: täglich neu trainiert mit den Merkmalen der letzten ml_training_days Tage
 # (ohne IP-Adressen). Gemeldet ab ml_threshold, mindestens aber ab dem 99,9-%-Quantil der Trainingsdaten.
 ml = true

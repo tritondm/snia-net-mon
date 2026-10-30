@@ -35,7 +35,7 @@ einschließlich der Mathematik dahinter. Installation und Konfigurationsschlüss
 | **Flow-Suche** (`#flows`) | Filter nach IP **oder CIDR** (Quelle/Ziel/beides), Port, Protokoll, Richtung, Zeitfenster; CSV-Export. Darunter die **Top Talker grafisch** mit ihren stärksten Gegenstellen (Dienst, gesendet/empfangen). Klick auf eine IP im Dashboard springt direkt hierher |
 | **PCAP** (`#pcap`) | Capture-Datei (pcap/pcapng, z. B. von tcpdump, Wireshark oder der Paketaufzeichnung der Firewall) per Drag & Drop hochladen: Kennzahlen, Zeitverlauf, Protokolle, **Anwendungen** (YouTube, Microsoft 365, CDN, AI … über TLS-SNI, DNS, HTTP-Host, IP-Präfixe), **Endpunkte mit Land und ASN**, Länder, Top Quellen/Ports/Flows, DNS, HTTP, TCP-Flags und heuristische **Auffälligkeiten** (Portscan, NXDOMAIN-Häufung, DNS/HTTP auf Nicht-Standard-Ports). Verlauf der Analysen; Klick auf eine IP sucht sie in den NetFlow-Daten |
 | **Archiv** (`#archive`) | Füllstand der Historie, Liste der Archive mit Zeitraum, Größe und Löschdatum. **Historie oder ein Archiv durchsuchen**: öffnet die Flow-Suche mit dieser Datenquelle (aus Archiven wird nur entpackt, was eine Abfrage braucht) |
-| **Anomalien** (`#anomalies`) | Statistik gegen eine Baseline je Netzgruppe und Host, Isolation Forest als zweite Meinung, Portscan, DNS an externe Resolver, erstes Land einer Gruppe, Beaconing, Netz-Regeln zwischen Zonen. Status der Lernphase und des Modells, **Zeitleiste** (aktive Auffälligkeiten je Stunde bzw. Tag nach Schwere, Klick auf einen Balken filtert die Liste), Verlauf der Auffälligkeiten (30 Tage) mit Filter. Externe IPs stehen mit Land und Anbieter da, Klick auf den Host öffnet die Flow-Suche. Siehe [Anomalie-Erkennung](#anomalie-erkennung) |
+| **Anomalien** (`#anomalies`) | Statistik gegen eine Baseline je Netzgruppe und Host, Isolation Forest als zweite Meinung, Portscan, DNS an externe Resolver, erstes Land einer Gruppe, Beaconing, schleichender Anstieg des Uploads, Netz-Regeln zwischen Zonen. Status der Lernphase und des Modells, **Zeitleiste** (aktive Auffälligkeiten je Stunde bzw. Tag nach Schwere, Klick auf einen Balken filtert die Liste), Verlauf der Auffälligkeiten (30 Tage) mit Filter. Externe IPs stehen mit Land und Anbieter da, Klick auf den Host öffnet die Flow-Suche. Siehe [Anomalie-Erkennung](#anomalie-erkennung) |
 | **GeoIP** | Land, Organisation und ASN für alle öffentlichen IPs – in der Live-Tabelle, Flow-Suche (auch CSV), Top Talker, Sankey, Anomalien und PCAP-Analyse |
 | **Aufbewahrung** | live 48 h (höchstens 72 h) → Historie bis 50 GB → zstd-Archiv, gelöscht 90 Tage nach dem jüngsten Flow; siehe [Aufbewahrung](#aufbewahrung-live--historie--archiv). PCAP-Analysen folgen dem Live-Fenster, die hochgeladene Datei selbst wird direkt nach der Analyse gelöscht |
 | **Ausgenommene Netze** | `network.exclude_networks`: Verkehr von oder zu diesen Netzen wird beim Empfang verworfen – nicht gespeichert, nicht angezeigt, nicht gezählt |
@@ -103,6 +103,7 @@ anders als die Geräte in seinem Netz zu dieser Zeit?* Dafür gibt es mehrere Ve
 | **Externes DNS** | DNS (53/853) an einen Resolver außerhalb, der nicht in `dns_servers` steht | warnung |
 | **Neues Land** | erste Verbindung einer Netzgruppe in ein Land, das sie nie zuvor kontaktiert hat | info |
 | **Beaconing** | ein Host meldet sich in fast gleichen Abständen beim selben externen Ziel, wie Schadsoftware bei ihrem Steuerserver | info, nie per Mail |
+| **Schleichend** (CUSUM) | der Upload eines Hosts liegt über viele Fenster *leicht* über dem Typischen – in keinem einzelnen Fenster genug für die Statistik, in Summe aber ein Abfluss. Text z. B. „upload seit 1 h 40 min erhöht: 500 MiB statt typisch 200 MiB (2.5×)“ | warnung |
 | **Netz-Regel** | Verbindung zwischen Zonen, die laut [Netz-Regeln](#netz-regeln) gemeldet werden soll, z. B. Schülernetz → Verwaltung | je Regel, Standard hoch |
 
 ### Ablauf
@@ -268,8 +269,10 @@ y' = \min\left(y,\ \mu + 3\hat\sigma\right)
 
 Ein Fenster kann den Mittelwert so höchstens um `α · 3σ̂` verschieben, nach der Lernphase also um `0,006 σ̂`. Ein
 3-GiB-Ausreißer zählt nicht mehr als ein Wert knapp über drei Standardabweichungen. Eine langsame, dauerhafte Steigerung
-wird trotzdem gelernt – das ist gewollt, Netze wachsen. Wer über Wochen hinweg täglich ein bisschen mehr hochlädt, fällt
-der Statistik nicht auf; dafür gibt es die Regeln, den Upload-Alarm und die Netz-Regeln.
+wird trotzdem gelernt – das ist gewollt, Netze wachsen. Ein Upload, der über Stunden oder Tage nur leicht erhöht ist,
+fällt der Statistik in keinem einzelnen Fenster auf; dafür gibt es den [schleichenden Anstieg](#5-schleichender-anstieg-cusum).
+Wer über Wochen hinweg täglich nur ein bisschen mehr hochlädt, zieht dagegen auch dessen Vergleichswert mit; dafür bleiben
+der Upload-Alarm und die Netz-Regeln.
 
 #### Netzgruppe und Host: die Vergleichsprofile
 
@@ -592,6 +595,78 @@ Schulsoftware), gehört **nur seine IP** in `beacon_allow`, nicht der ganze Anbi
 im eigenen Netz vorkommen, etwa die Telefonanlage (SIP über TLS, Port 5061) oder eine Verwaltungssoftware beim
 regionalen Hoster: erst klären, dann die IP freigeben.
 
+### 5. Schleichender Anstieg (CUSUM)
+
+Die Statistik prüft jedes Fenster für sich. Ein Angreifer, der Daten abzieht und die Schwellen kennt, lädt deshalb
+*langsam* hoch: in jedem Fenster nur das Zwei- oder Dreifache des Üblichen, dafür über Stunden („Low and Slow“). Jedes
+einzelne Fenster liegt dann weit unter `z_threshold` und unter `min_upload_mb`. Erst die **Summe** über viele Fenster
+verrät den Abfluss.
+
+#### Die Summe
+
+Je Host läuft eine einseitige **CUSUM**-Summe (Cumulative Sum, Page 1954) über die Z-Scores des Uploads. Der Z-Score
+`z_t` ist derselbe wie bei der Statistik: gegen das Host-Profil oder, solange es fehlt, gegen die Gruppe zur selben Zeit.
+
+```math
+S_t = \min\Big(2h,\ \max\big(0,\ S_{t-1} + \min(z_t,\ z_{\text{thr}}) - k\big)\Big)
+```
+
+- **Toleranz `k`** (`drift_k`, Standard 0,5): So viel Abweichung gilt noch als normal. Liegt der Upload um das Typische
+  (`z` um 0), zieht jedes Fenster die Summe um `k` nach unten, bis sie bei 0 hängen bleibt. Erst ein Upload, der
+  **dauerhaft** mehr als `k` Standardabweichungen über dem Typischen liegt, lässt sie wachsen.
+- **Grenze `h`** (`drift_h`, Standard 10): Ab `S ≥ h` wird gemeldet – wenn außerdem seit Beginn des Anstiegs (dem
+  Fenster, in dem `S` von 0 losgelaufen ist) mindestens `drift_min_mb` (250 MiB) **mehr** als typisch hochgeladen wurden:
+
+```math
+\sum_{\text{seit Beginn}} \left(x_t - t_t\right) \ge \texttt{drift\_min\_mb}
+```
+
+  mit dem Rohwert `x_t` und dem typischen Wert `t_t = e^μ − 1` je Fenster. Wie bei der Statistik verhindert der
+  Mindestwert Meldungen über Geräte, die nur relativ viel mehr tun.
+- **`min(z, z_thr)`:** Eine einzelne große Spitze meldet schon die Statistik. Sie zählt hier höchstens wie `z_threshold`
+  und kann die Summe nicht allein über die Grenze heben.
+- **`min(…, 2h)`:** Die Summe ist nach oben begrenzt. Hört der Anstieg auf, fällt sie in absehbarer Zeit wieder unter `h`.
+
+Fehlt ein Fenster des Hosts (kein Verkehr, Profil noch nicht eingelernt, unvollständiges Fenster nach dem Start),
+beginnt die Summe neu. Der Zustand liegt nur im Speicher (eine Zahl je Host) und beginnt nach einem Neustart von vorn.
+
+#### Rechenbeispiel
+
+Ein Arbeitsplatz lädt typisch 20 MiB pro Fenster hoch, die Streuung seines Slots ist `σ̂ = 0,6`. Jetzt lädt er in jedem
+Fenster 50 MiB hoch, also das 2,5-Fache:
+
+```math
+z = \frac{\ln(1 + 50\,\text{MiB}) - \ln(1 + 20\,\text{MiB})}{0{,}6} \approx \frac{\ln 2{,}5}{0{,}6} \approx 1{,}53,
+\qquad S \text{ wächst je Fenster um } 1{,}53 - 0{,}5 = 1{,}03
+```
+
+Die Statistik schweigt: `z = 1,53` ist weit unter 4 (dafür bräuchte es das `e^{4 · 0,6} ≈ 11`-Fache), und 50 MiB sind
+unter `min_upload_mb`. Nach **10 Fenstern** (1 h 40 min) ist `S ≈ 10,3 ≥ h`, die Mehrmenge `10 · 30 MiB = 300 MiB`
+liegt über 250 MiB: Meldung „upload seit 1 h 40 min erhöht: 500 MiB statt typisch 200 MiB (2.5×)“. Hält der Anstieg
+an, wird dieselbe Zeile verlängert, die Summe steht als Score dabei.
+
+#### Wie oft schlägt reines Rauschen an?
+
+Für normalverteilte Z-Scores ohne echten Anstieg gibt die Näherung von Siegmund die mittlere Zahl an Fenstern bis zum
+ersten Fehlalarm einer CUSUM-Summe an:
+
+```math
+\text{ARL}_0 \approx \frac{e^{2k(h + 1{,}166)} - 2k(h + 1{,}166) - 1}{2k^2}
+```
+
+Mit `k = 0,5` und `h = 10` sind das rund 140.000 Fenster, bei 10-Minuten-Fenstern gut 2,5 Jahre je Host. Echter
+Verkehr ist weniger brav als eine Normalverteilung (Sitzungen über mehrere Fenster, schwere Ränder), Fehlalarme kommen
+also öfter vor. Der Mindestwert `drift_min_mb` filtert dann die meisten leisen Geräte heraus. Kleinere `k` oder `h`
+machen die Erkennung empfindlicher, aber auch lauter.
+
+#### Was harmlos so aussieht
+
+Alles, was einen Host dauerhaft etwas mehr hochladen lässt: ein neu eingerichteter Cloud-Sync (OneDrive, Nextcloud),
+ein Backup, das größer geworden ist, eine Videokonferenz über Stunden. Die Meldung nennt deshalb wie die Statistik die
+größten Ziele des letzten Fensters mit Land und Anbieter. Ist der Grund geklärt, hilft eine Ausnahme für den Host (Art
+`drift`). Die Statuskarte „letzte 24 h“ zeigt, wie viele Hosts gerade mindestens die halbe Grenze erreicht haben
+(„steigend“).
+
 ### Netz-Regeln
 
 Mit vielen festen Netzen lässt sich genau sagen, wer mit wem reden darf. Dazu werden Netze als **Zonen** benannt und
@@ -734,7 +809,8 @@ Schüler-PC lösen keine Meldung aus, gezählt wird nur die Anfrage.
 **Lernphase:** In den ersten `learning_days` (Standard 7) nach dem ersten Start wird nur gelernt: Baselines füllen sich,
 Länder werden gesammelt, Trainingsvektoren gespeichert. Statistik, Isolation Forest und „neues Land“ melden in dieser Zeit
 nichts. Portscan, externes DNS, Beaconing und Netz-Regeln melden sofort. Der Isolation Forest trainiert nach der Lernphase
-und danach täglich; reichen die Daten noch nicht (unter 1000 Vektoren), versucht er es stündlich erneut. Der Beginn der
+und danach täglich; reichen die Daten noch nicht (unter 1000 Vektoren), versucht er es stündlich erneut. Der
+schleichende Anstieg braucht wie die Statistik ein eingelerntes Vergleichsprofil und meldet erst nach der Lernphase. Der Beginn der
 Lernphase steht in `anomaly.db` und überlebt Neustarts.
 
 **Zusammenfassen:** Tritt dieselbe Art beim selben Host (bei Netz-Regeln: dieselbe Regel, bei Beaconing: dasselbe Ziel)
@@ -770,6 +846,7 @@ mail_kinds = { dns = "warn", country = "off" }   # externes DNS schon ab warnung
 | `country` | neues land | info |
 | `policy` | netz-regel | je Regel (`severity`) |
 | `beacon` | beaconing | info |
+| `drift` | schleichend | warnung |
 
 ### Ausnahmen in der Web-UI
 
@@ -817,6 +894,7 @@ Nach der Lernphase lohnt ein Blick auf die Liste der ersten Tage. Typische Fäll
 | Externes DNS von einem erlaubten Resolver | Resolver in `dns_servers` |
 | Externes DNS vom eigenen DNS-Server oder Router | Host in `dns_clients` |
 | Netz-Regel schlägt bei einem erlaubten Dienst an | `allow`-Regel mit `ports` **vor** die meldende Regel |
+| „schleichend“ bei einem Host mit Cloud-Sync oder Backup | Ausnahme für den Host (Art `drift`); bei vielen harmlosen Treffern `drift_min_mb` oder `drift_h` erhöhen |
 
 ## Architektur
 
@@ -1059,10 +1137,11 @@ Wie lange Daten damit insgesamt aufbewahrt werden und was das für den Datenschu
   Anomalie-Erkennung sieht nur einen Teil der Verbindungen.
 - **Zeitstempel:** Flows werden nach ihrem Ende (`ts`) einsortiert. Lange Flows erscheinen im Durchsatz-Chart daher als Spitze
   zum Exportzeitpunkt, wie bei NetFlow üblich.
-- **Anomalie-Erkennung:** Sie sieht nur Metadaten, keine Inhalte. Langsame, über Wochen wachsende Abflüsse lernt die
-  Baseline mit; Beaconing mit stark zufälligen Abständen (mehr als `beacon_max_jitter`) oder über wechselnde Anbieter
-  fällt nicht auf. DNS over HTTPS ist als „externes DNS“ nicht erkennbar. Die Beaconing-Historie liegt nur im Speicher
-  und beginnt nach einem Neustart von vorn.
+- **Anomalie-Erkennung:** Sie sieht nur Metadaten, keine Inhalte. Abflüsse über Stunden bis Tage findet der
+  schleichende Anstieg; sehr langsame, über Wochen wachsende lernt die Baseline mit. Beobachtet wird dabei nur der
+  Upload. Beaconing mit stark zufälligen Abständen (mehr als `beacon_max_jitter`) oder über wechselnde Anbieter
+  fällt nicht auf. DNS over HTTPS ist als „externes DNS“ nicht erkennbar. Die Beaconing-Historie und die CUSUM-Summen liegen
+  nur im Speicher und beginnen nach einem Neustart von vorn.
 - **PCAP-Analyse** erkennt Anwendungen nur über unverschlüsselte Merkmale (SNI, DNS, HTTP-Host). Mit ECH (Encrypted Client
   Hello) oder DNS-over-HTTPS sinkt die Trefferquote. Die Analyse hält pro Paket nur einen Zeitstempel im Speicher, sehr große
   Mitschnitte (Hunderte Millionen Pakete) brauchen entsprechend RAM.

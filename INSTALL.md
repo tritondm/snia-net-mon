@@ -171,6 +171,7 @@ A single file: `cp config.example.toml config.toml`. All keys are commented ther
 | `anomaly.beacon_min_connections` / `beacon_min_minutes` / `beacon_max_jitter` | `20` / `120` / `0.2` | pattern from this many connections over this many minutes with at most this relative spread of the intervals |
 | `anomaly.beacon_max_hosts` | `3` | from this many hosts with the same pattern to the same provider and port on, it counts as rolled-out software (higher = **more** reports) |
 | `anomaly.beacon_allow` / `beacon_allow_asn` / `beacon_allow_ports` | empty / empty / `[123]` | exceptions: hosts or destinations (IP/CIDR), providers (ASN, [list](FEATURES.md#common-harmless-providers)), destination ports |
+| `anomaly.drift` / `drift_k` / `drift_h` / `drift_min_mb` | `true` / `0.5` / `10` / `250` | slowly rising upload (CUSUM): tolerance, limit of the sum, minimum excess in MiB, see [CUSUM](FEATURES.md#5-slow-rise-cusum) |
 | `anomaly.ml` / `ml_threshold` / `ml_training_days` | `true` / `0.65` / `14` | Isolation Forest |
 | `anomaly.event_retention_days` | `30` | retention of anomalies |
 | `anomaly.timezone` | empty | time zone for weekday/hour, empty = system |

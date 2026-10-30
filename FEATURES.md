@@ -38,7 +38,7 @@ in parentheses.
 | **Flow search** (`#flows`) | Filter by IP **or CIDR** (source/destination/both), port, protocol, direction, time range; CSV export. Below that the **top talkers as a graph** with their strongest peers (service, sent/received). Clicking an IP in the dashboard jumps straight here |
 | **PCAP** (`#pcap`) | Upload a capture file (pcap/pcapng, e.g. from tcpdump, Wireshark or the firewall's packet capture) by drag & drop: key figures, timeline, protocols, **applications** (YouTube, Microsoft 365, CDN, AI … via TLS SNI, DNS, HTTP host, IP prefixes), **endpoints with country and ASN**, countries, top sources/ports/flows, DNS, HTTP, TCP flags and heuristic **anomalies** (port scan, NXDOMAIN clusters, DNS/HTTP on non-standard ports). History of analyses; clicking an IP searches for it in the NetFlow data |
 | **Archive** (`#archive`) | Fill level of the history, list of archives with period, size and deletion date. **Search the history or an archive**: opens the flow search with this data source (only what a query needs is unpacked from archives) |
-| **Anomalies** (`#anomalies`) | Statistics against a baseline per network group and host, Isolation Forest as a second opinion, port scan, DNS to external resolvers, first country of a group, beaconing, network rules between zones. Status of the learning phase and the model, **timeline** (active anomalies per hour or day by severity, clicking a bar filters the list), history of anomalies (30 days) with filters. External IPs are shown with country and provider, clicking the host opens the flow search. See [anomaly detection](#anomaly-detection) |
+| **Anomalies** (`#anomalies`) | Statistics against a baseline per network group and host, Isolation Forest as a second opinion, port scan, DNS to external resolvers, first country of a group, beaconing, slowly rising upload, network rules between zones. Status of the learning phase and the model, **timeline** (active anomalies per hour or day by severity, clicking a bar filters the list), history of anomalies (30 days) with filters. External IPs are shown with country and provider, clicking the host opens the flow search. See [anomaly detection](#anomaly-detection) |
 | **GeoIP** | Country, organisation and ASN for all public IPs – in the live table, flow search (also CSV), top talkers, Sankey, anomalies and PCAP analysis |
 | **Retention** | live 48 h (at most 72 h) → history up to 50 GB → zstd archive, deleted 90 days after the newest flow; see [retention](#retention-live--history--archive). PCAP analyses follow the live window, the uploaded file itself is deleted right after the analysis |
 | **Excluded networks** | `network.exclude_networks`: traffic from or to these networks is discarded on reception – not stored, not shown, not counted |
@@ -107,6 +107,7 @@ or differently from the devices in its network at this time?* Several methods co
 | **External DNS** | DNS (53/853) to a resolver outside that is not listed in `dns_servers` | warn |
 | **New country** | first connection of a network group to a country it has never contacted before | info |
 | **Beaconing** | a host calls the same external destination at almost equal intervals, like malware calling its command server | info, never by mail |
+| **Slow rise** (CUSUM) | a host's upload stays *slightly* above typical over many windows – not enough for the statistics in any single window, but exfiltration in total. Text e.g. "upload seit 1 h 40 min erhöht: 500 MiB statt typisch 200 MiB (2.5×)" (raised for … instead of typically) | warn |
 | **Network rule** | connection between zones that should be reported according to the [network rules](#network-rules), e.g. student network → administration | per rule, default high |
 
 ### Process
@@ -271,8 +272,9 @@ y' = \min\left(y,\ \mu + 3\hat\sigma\right)
 
 A window can thus shift the mean by at most `α · 3σ̂`, after the learning phase by `0.006 σ̂`. A 3 GiB outlier counts no
 more than a value just above three standard deviations. A slow, sustained increase is still learned – that is
-intended, networks grow. Someone uploading a little more every day over weeks will not be noticed by the statistics;
-that is what the rules, the upload alert and the network rules are for.
+intended, networks grow. An upload that is only slightly raised for hours or days does not stand out to the statistics in
+any single window; that is what the [slow rise](#5-slow-rise-cusum) is for. Someone uploading only a little more every
+day over weeks also pulls its reference along; for that there are the upload alert and the network rules.
 
 #### Network group and host: the reference profiles
 
@@ -595,6 +597,78 @@ put **only its IP** into `beacon_allow`, not the whole provider. The same goes f
 network, such as the phone system (SIP over TLS, port 5061) or administration software at a regional hoster: clarify
 first, then allow the IP.
 
+### 5. Slow rise (CUSUM)
+
+The statistics look at each window on its own. An attacker who exfiltrates data and knows the thresholds therefore
+uploads *slowly*: in every window only two or three times the usual amount, but for hours ("low and slow"). Each single
+window is then far below `z_threshold` and below `min_upload_mb`. Only the **sum** over many windows gives it away.
+
+#### The sum
+
+Per host, a one-sided **CUSUM** sum (cumulative sum, Page 1954) runs over the z-scores of the upload. The z-score `z_t` is
+the same as for the statistics: against the host profile or, as long as there is none, against the group at the same
+time.
+
+```math
+S_t = \min\Big(2h,\ \max\big(0,\ S_{t-1} + \min(z_t,\ z_{\text{thr}}) - k\big)\Big)
+```
+
+- **Tolerance `k`** (`drift_k`, default 0.5): this much deviation still counts as normal. If the upload stays around
+  typical (`z` around 0), each window pulls the sum down by `k` until it sticks at 0. Only an upload that is
+  **persistently** more than `k` standard deviations above typical lets it grow.
+- **Limit `h`** (`drift_h`, default 10): from `S ≥ h` on it is reported – provided that since the start of the rise (the
+  window in which `S` left 0) at least `drift_min_mb` (250 MiB) **more** than typical was uploaded:
+
+```math
+\sum_{\text{since start}} \left(x_t - t_t\right) \ge \texttt{drift\_min\_mb}
+```
+
+  with the raw value `x_t` and the typical value `t_t = e^μ − 1` per window. As with the statistics, the minimum prevents
+  reports about devices that merely do relatively much more.
+- **`min(z, z_thr)`:** a single large spike is already reported by the statistics. Here it counts at most as
+  `z_threshold` and cannot lift the sum over the limit on its own.
+- **`min(…, 2h)`:** the sum is capped. Once the rise stops, it drops below `h` again in reasonable time.
+
+If a window of the host is missing (no traffic, profile not trained yet, incomplete window after the start), the sum
+starts over. The state lives only in memory (one number per host) and starts from scratch after a restart.
+
+#### Worked example
+
+A workstation typically uploads 20 MiB per window, the spread of its slot is `σ̂ = 0.6`. Now it uploads 50 MiB in every
+window, i.e. 2.5 times as much:
+
+```math
+z = \frac{\ln(1 + 50\,\text{MiB}) - \ln(1 + 20\,\text{MiB})}{0.6} \approx \frac{\ln 2.5}{0.6} \approx 1.53,
+\qquad S \text{ grows per window by } 1.53 - 0.5 = 1.03
+```
+
+The statistics stay silent: `z = 1.53` is far below 4 (that would need `e^{4 · 0.6} ≈ 11` times as much), and 50 MiB is
+below `min_upload_mb`. After **10 windows** (1 h 40 min) `S ≈ 10.3 ≥ h`, the excess `10 · 30 MiB = 300 MiB` is above
+250 MiB: report "upload seit 1 h 40 min erhöht: 500 MiB statt typisch 200 MiB (2.5×)". If the rise continues, the same
+row is extended, with the sum as its score.
+
+#### How often does pure noise fire?
+
+For normally distributed z-scores without a real rise, Siegmund's approximation gives the mean number of windows until
+the first false alarm of a CUSUM sum:
+
+```math
+\text{ARL}_0 \approx \frac{e^{2k(h + 1.166)} - 2k(h + 1.166) - 1}{2k^2}
+```
+
+With `k = 0.5` and `h = 10` that is about 140,000 windows, with 10-minute windows a good 2.5 years per host. Real
+traffic is less well-behaved than a normal distribution (sessions spanning several windows, heavy tails), so false
+alarms happen more often. The minimum `drift_min_mb` then filters out most quiet devices. Smaller `k` or `h` make the
+detection more sensitive, but also noisier.
+
+#### What looks like this but is harmless
+
+Anything that makes a host upload a bit more for a long time: a newly set up cloud sync (OneDrive, Nextcloud), a backup
+that has grown, a video conference lasting hours. Like the statistics, the report therefore names the largest
+destinations of the last window with country and provider. Once the reason is clear, an exception for the host (kind
+`drift`) helps. The status card "last 24 h" shows how many hosts have currently reached at least half the limit
+("rising").
+
 ### Network rules
 
 With many fixed networks you can say exactly who may talk to whom. To do this, networks are named as **zones** and
@@ -741,7 +815,8 @@ counts.
 baselines fill up, countries are collected, training vectors stored. Statistics, Isolation Forest and "new country"
 report nothing during this time. Port scan, external DNS, beaconing and network rules report immediately. The Isolation
 Forest trains after the learning phase and daily thereafter; if there is not enough data yet (fewer than 1000 vectors),
-it retries hourly. The start of the learning phase is stored in `anomaly.db` and survives restarts.
+it retries hourly. Like the statistics, the slow rise needs a trained reference profile and only reports after the
+learning phase. The start of the learning phase is stored in `anomaly.db` and survives restarts.
 
 **Merging:** if the same kind occurs again for the same host (for network rules: the same rule, for beaconing: the same
 destination) within an hour, the existing row is extended ("3×") instead of creating a new one. The strongest
@@ -776,6 +851,7 @@ mail_kinds = { dns = "warn", country = "off" }   # external DNS from warn alread
 | `country` | new country | info |
 | `policy` | network rule | per rule (`severity`) |
 | `beacon` | beaconing | info |
+| `drift` | schleichend (slow rise) | warn |
 
 ### Exceptions in the web UI
 
@@ -822,6 +898,7 @@ After the learning phase it is worth looking at the list of the first few days. 
 | External DNS from a permitted resolver | resolver in `dns_servers` |
 | External DNS from your own DNS server or router | host in `dns_clients` |
 | A network rule fires for a permitted service | `allow` rule with `ports` **before** the reporting rule |
+| "schleichend" (slow rise) for a host with cloud sync or backup | exception for the host (kind `drift`); with many harmless hits raise `drift_min_mb` or `drift_h` |
 
 ## Architecture
 
@@ -1057,10 +1134,11 @@ How long data is kept overall and what that means for privacy is described under
   connections.
 - **Timestamps:** flows are sorted by their end (`ts`). Long flows therefore appear in the throughput chart as a spike at
   export time, as is usual with NetFlow.
-- **Anomaly detection:** it only sees metadata, no content. Slow exfiltration growing over weeks is learned by the
-  baseline; beaconing with strongly random intervals (more than `beacon_max_jitter`) or across changing providers goes
-  unnoticed. DNS over HTTPS cannot be detected as "external DNS". The beaconing history lives only in memory and starts
-  from scratch after a restart.
+- **Anomaly detection:** it only sees metadata, no content. Exfiltration over hours to days is found by the slow
+  rise; very slow exfiltration growing over weeks is learned by the baseline. Only the upload is watched for this.
+  Beaconing with strongly random intervals (more than `beacon_max_jitter`) or across changing providers goes
+  unnoticed. DNS over HTTPS cannot be detected as "external DNS". The beaconing history and the CUSUM sums live only in
+  memory and start from scratch after a restart.
 - **PCAP analysis** only detects applications via unencrypted attributes (SNI, DNS, HTTP host). With ECH (Encrypted
   Client Hello) or DNS over HTTPS the hit rate drops. The analysis keeps only one timestamp per packet in memory; very
   large captures (hundreds of millions of packets) need correspondingly more RAM.

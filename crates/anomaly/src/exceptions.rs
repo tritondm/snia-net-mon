@@ -10,7 +10,7 @@
 //! | `beacon` | Anbieter `AS8075`, Anbieter und Port `AS8075:443` oder Gegenstelle (IP oder Netz) |
 //! | `policy` | Name der Netz-Regel |
 //! | `country` | Ländercode, z. B. `CN` |
-//! | `stat`, `ml`, `scan` | – (nur `host`) |
+//! | `stat`, `ml`, `scan`, `drift` | – (nur `host`) |
 
 use crate::store::Kind;
 use model::LocalNetworks;
@@ -121,7 +121,7 @@ pub fn normalize(input: &ExceptionInput) -> Result<Normalized, String> {
         (Kind::Policy, Some(t)) => Some(t.to_string()),
         (Kind::Country, Some(t)) if t.len() == 2 && t.chars().all(|c| c.is_ascii_alphabetic()) => Some(t.to_ascii_uppercase()),
         (Kind::Country, Some(t)) => return Err(format!("ziel {t:?}: erwartet einen Ländercode wie CN")),
-        (Kind::Stat | Kind::Ml | Kind::Scan, Some(_)) => return Err(format!("{}: hier gibt es kein ziel, nur einen host", kind.name())),
+        (Kind::Stat | Kind::Ml | Kind::Scan | Kind::Drift, Some(_)) => return Err(format!("{}: hier gibt es kein ziel, nur einen host", kind.name())),
     };
     if host.is_none() && target.is_none() {
         return Err("host oder ziel angeben – sonst wäre die ganze art ausgenommen".into());
@@ -207,7 +207,7 @@ impl Exceptions {
             }
             Kind::Policy => self.find(kind, &Subject { host, name: detail["rule"].as_str(), ..Default::default() }, now),
             Kind::Country => self.find(kind, &Subject { host, name: detail["cc"].as_str(), ..Default::default() }, now),
-            Kind::Stat | Kind::Ml | Kind::Scan => self.find(kind, &Subject { host, ..Default::default() }, now),
+            Kind::Stat | Kind::Ml | Kind::Scan | Kind::Drift => self.find(kind, &Subject { host, ..Default::default() }, now),
         }
     }
 

@@ -7,6 +7,7 @@
 //! * feste Regeln: Portscan (SYN ohne ACK), DNS an externe Resolver, erstes Land einer Gruppe
 //! * [`policy`] – Netz-Regeln: Zonen und eine geordnete Regelliste (z. B. „schüler → verwaltung“ melden)
 //! * [`beacon`] – Beaconing: regelmäßige Verbindungen eines Hosts zum selben externen Ziel (C2-Muster)
+//! * [`drift`] – schleichender Anstieg: CUSUM über die Z-Scores des Uploads („Low and Slow“-Abfluss)
 //! * [`store`] – `anomaly.db`: Baselines, Trainingsvektoren (ohne IP), gemeldete Auffälligkeiten
 //!
 //! Der Task hängt wie der Upload-Alarm am Flow-Strom des Collectors, sammelt ein Fenster (Standard 10 min) und wertet es
@@ -14,6 +15,7 @@
 
 pub mod baseline;
 pub mod beacon;
+pub mod drift;
 pub mod exceptions;
 mod engine;
 pub mod features;
@@ -113,6 +115,8 @@ pub struct AnomalyConfig {
     pub policy: policy::Policy,
     /// Beaconing-Erkennung samt Ausnahmen
     pub beacon: beacon::BeaconConfig,
+    /// Schleichender Anstieg des Uploads (CUSUM)
+    pub drift: drift::DriftConfig,
 }
 
 impl Default for AnomalyConfig {
@@ -149,6 +153,7 @@ impl Default for AnomalyConfig {
             max_mails_per_hour: 20,
             policy: policy::Policy::default(),
             beacon: beacon::BeaconConfig::default(),
+            drift: drift::DriftConfig::default(),
         }
     }
 }
@@ -217,6 +222,7 @@ pub fn spawn(
         ml = config.ml,
         policy_rules = config.policy.rules.len(),
         beacon = config.beacon.enabled,
+        drift = config.drift.enabled,
         mail = config.mail,
         "Anomalie-Erkennung aktiv"
     );
@@ -275,6 +281,7 @@ fn kind_label(kind: Kind) -> &'static str {
         Kind::Country => "neues land",
         Kind::Policy => "netz-regel",
         Kind::Beacon => "beaconing",
+        Kind::Drift => "schleichend",
     }
 }
 

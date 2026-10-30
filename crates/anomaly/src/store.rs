@@ -25,10 +25,12 @@ pub enum Kind {
     Policy,
     /// regelmäßige Verbindungen zu einem externen Ziel
     Beacon,
+    /// Upload über viele Fenster leicht erhöht (CUSUM)
+    Drift,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [Kind::Stat, Kind::Ml, Kind::Scan, Kind::Dns, Kind::Country, Kind::Policy, Kind::Beacon];
+    pub const ALL: [Kind; 8] = [Kind::Stat, Kind::Ml, Kind::Scan, Kind::Dns, Kind::Country, Kind::Policy, Kind::Beacon, Kind::Drift];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -39,6 +41,7 @@ impl Kind {
             Kind::Country => "country",
             Kind::Policy => "policy",
             Kind::Beacon => "beacon",
+            Kind::Drift => "drift",
         }
     }
 

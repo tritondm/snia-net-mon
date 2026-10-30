@@ -3,6 +3,7 @@
 use crate::AnomalyConfig;
 use crate::baseline::{Baselines, SlotKind};
 use crate::beacon::{self, Finding, Tracker};
+use crate::drift;
 use crate::exceptions::{ExceptionInput, ExceptionRow, Exceptions, Subject};
 use crate::baseline::Profile;
 use crate::features::{FEATURES, HostWindow, NAMES, PolicyHit, Window, is_bytes};
@@ -153,6 +154,9 @@ pub struct Status {
     pub beacon: bool,
     /// beobachtete Verbindungspaare (Host, Ziel, Port)
     pub beacon_pairs: usize,
+    pub drift: bool,
+    /// Hosts, deren CUSUM-Summe mindestens die halbe Grenze erreicht hat (Upload seit einer Weile leicht erhöht)
+    pub drift_rising: usize,
 }
 
 pub(crate) struct Engine {
@@ -174,6 +178,7 @@ pub(crate) struct Engine {
     last_train_attempt_ms: i64,
     rng: Rng,
     beacons: Tracker,
+    drift: drift::Tracker,
 }
 
 impl Engine {
@@ -213,6 +218,7 @@ impl Engine {
             last_train_attempt_ms: i64::MIN / 2,
             rng: Rng::new(now as u64 ^ 0x5eed_a90a),
             beacons: Tracker::default(),
+            drift: drift::Tracker::default(),
         })
     }
 
@@ -253,6 +259,16 @@ impl Engine {
                         let z = profile[f].z(log[f]);
                         if z >= self.cfg.z_threshold && raw[f] >= self.cfg.minimums[f] {
                             hits.push(Hit { feature: f, value: raw[f], typical: profile[f].mean.exp_m1().max(0.0), z });
+                        }
+                    }
+                    if self.cfg.drift.enabled {
+                        let f = drift::FEATURE;
+                        let typical = profile[f].mean.exp_m1().max(0.0);
+                        let z = profile[f].z(log[f]);
+                        if let Some(state) = self.drift.update(&self.cfg.drift, self.cfg.z_threshold, &host, window.start_ms, self.window_ms(), z, raw[f], typical) {
+                            let mut event = drift_event(end, &host, &group, &state, kind, &self.cfg.drift, self.window_ms());
+                            event.detail["context"] = context(h, &window, window.start_ms);
+                            found.push(event);
                         }
                     }
                 }
@@ -344,6 +360,7 @@ impl Engine {
                 tracing::debug!(vectors = v, events = e, "Anomalie-Erkennung: alte Daten gelöscht");
             }
             self.open.retain(|_, o| now - o.last_ts <= MERGE_GAP_MS + self.cfg.window.as_millis() as i64);
+            self.drift.prune(window.start_ms - self.window_ms());
         }
         Ok(created)
     }
@@ -462,6 +479,8 @@ impl Engine {
             policy_zones: self.cfg.policy.zones,
             beacon: self.cfg.beacon.enabled,
             beacon_pairs: self.beacons.pairs(),
+            drift: self.cfg.drift.enabled,
+            drift_rising: self.drift.rising(self.cfg.drift.h),
         })
     }
 }
@@ -761,6 +780,50 @@ fn beacon_event(ts: i64, group: &str, f: &Finding, info: &beacon::PeerInfo) -> E
     }
 }
 
+/// Schleichender Anstieg: Der Upload liegt seit `state.windows` Fenstern leicht über dem Typischen.
+fn drift_event(ts: i64, host: &str, group: &str, state: &drift::State, slot: SlotKind, cfg: &drift::DriftConfig, window_ms: i64) -> Event {
+    let f = drift::FEATURE;
+    let title = format!(
+        "{} seit {} erhöht: {} statt typisch {} ({}×)",
+        NAMES[f],
+        fmt_duration(state.windows as i64 * window_ms),
+        fmt_value(f, state.value),
+        fmt_value(f, state.typical),
+        fmt_factor((state.value + 1.0) / (state.typical + 1.0))
+    );
+    Event {
+        ts,
+        host: host.into(),
+        group: group.into(),
+        kind: Kind::Drift,
+        tag: NAMES[f].into(),
+        severity: Severity::Warn,
+        score: state.sum,
+        title,
+        detail: json!({
+            "name": NAMES[f],
+            "since_ms": state.since_ms,
+            "windows": state.windows,
+            "value": state.value,
+            "typical": state.typical,
+            "excess": state.excess(),
+            "cusum": round2(state.sum),
+            "k": cfg.k,
+            "h": cfg.h,
+            "slot": slot.name(),
+        }),
+    }
+}
+
+fn fmt_duration(ms: i64) -> String {
+    let min = ms / 60_000;
+    match (min / 60, min % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
 fn fmt_interval(secs: f64) -> String {
     if secs >= 90.0 { format!("{:.1} min", secs / 60.0) } else { format!("{secs:.0} s") }
 }
@@ -944,6 +1007,44 @@ mod tests {
         assert!(!status.learning);
         assert_eq!(status.groups, 1);
         assert!(status.ml.trained_ms.is_some());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn slightly_raised_upload_over_many_windows_is_reported_as_drift() {
+        let cfg = AnomalyConfig { drift: drift::DriftConfig { min_excess: 20.0 * MIB as f64, ..Default::default() }, ..config("drift") };
+        let path = cfg.db_path.clone();
+        let mut engine = Engine::open(cfg, 0).unwrap();
+        let window = 600_000;
+        // Montag, 00:00 UTC: Wochen-Slots der Stunden 0–6 einlernen
+        let t0 = 1_792_368_000_000;
+        for i in 0..40 {
+            let now = t0 + i * window;
+            engine.finish_window(normal_window(now, i as u64), now + window).unwrap();
+        }
+        // eine Woche später: 10.0.1.10 lädt in jedem Fenster 8 MiB mehr hoch – unter jeder Schwelle der Statistik
+        let t1 = t0 + 7 * DAY_MS;
+        let geo = geo::GeoLookup::disabled();
+        let mut drifts = Vec::new();
+        for i in 0..12 {
+            let start = t1 + i * window;
+            let mut w = normal_window(start, 200 + i as u64);
+            w.add(&flow("10.0.1.10", "198.51.100.9", 443, 8 * MIB, 0x1b, Direction::Out), &filters(), &geo);
+            let created = engine.finish_window(w, start + window).unwrap();
+            assert!(!created.iter().any(|e| e.kind == Kind::Stat && e.host == "10.0.1.10"), "kein Statistik-Treffer: {created:?}");
+            drifts.extend(created.into_iter().filter(|e| e.kind == Kind::Drift));
+        }
+        assert_eq!(drifts.len(), 1, "einmal angelegt, danach verlängert: {drifts:?}");
+        let d = &drifts[0];
+        assert_eq!((d.host.as_str(), d.severity), ("10.0.1.10", Severity::Warn));
+        assert!(d.title.starts_with("upload seit "), "{}", d.title);
+        assert!(d.detail["since_ms"].as_i64().unwrap() >= t1);
+        assert!(d.detail["excess"].as_f64().unwrap() >= 20.0 * MIB as f64);
+        assert_eq!(d.detail["context"]["peers"][0]["ip"], "198.51.100.9");
+        let rows = engine.events(&EventFilter { kind: Some("drift".into()), ..Default::default() }).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].count > 1);
+        assert_eq!(engine.status(t1 + 12 * window).unwrap().drift_rising, 1);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

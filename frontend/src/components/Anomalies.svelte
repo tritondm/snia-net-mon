@@ -146,7 +146,7 @@
 
   // Flow-Suche im Zeitraum der Auffälligkeit (eine Minute Rand für spät exportierte Flows)
   const windowLen = () => (status?.window_minutes ?? 10) * 60_000;
-  const eventRange = (r) => ({ from: (r.kind === 'beacon' && r.detail?.first_ms) || r.ts - windowLen(), to: r.last_ts + 60_000 });
+  const eventRange = (r) => ({ from: (r.kind === 'beacon' && r.detail?.first_ms) || (r.kind === 'drift' && r.detail?.since_ms) || r.ts - windowLen(), to: r.last_ts + 60_000 });
   // Zeitraum des Fensters, aus dem der Kontext einer Meldung stammt
   const contextRange = (from) => ({ from, to: from + windowLen() + 60_000 });
 
@@ -229,7 +229,7 @@
             <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-ctp-surface0/70">
               <div class="h-full rounded-full" style="width: {Math.max(1, learnFill * 100)}%; background: linear-gradient(90deg, #94e2d5, #cba6f7)"></div>
             </div>
-            <div class="mt-2 text-[11px] text-ctp-overlay0">portscan, externes dns, netz-regeln und beaconing melden sofort, statistik, ml und neue länder erst nach der lernphase</div>
+            <div class="mt-2 text-[11px] text-ctp-overlay0">portscan, externes dns, netz-regeln und beaconing melden sofort, statistik, schleichender anstieg, ml und neue länder erst nach der lernphase</div>
           </div>
 
           <div class="rounded-lg border border-ctp-surface0/70 bg-ctp-mantle/40 p-3">
@@ -269,7 +269,7 @@
               <span class="chip"><span class="led bg-ctp-overlay0"></span>info {status.counts_24h.info}</span>
             </div>
             <div class="mt-2 text-[11px] text-ctp-overlay0">
-              netz-regeln: {status.policy_rules ? `${status.policy_rules} regeln, ${status.policy_zones} zonen` : 'keine'} · beaconing {status.beacon ? `an (${fmtNum(status.beacon_pairs)} paare)` : 'aus'} · mails {status.mail ? (mailKinds.length ? 'an' : 'an, aber alle arten aus') : 'aus'}
+              netz-regeln: {status.policy_rules ? `${status.policy_rules} regeln, ${status.policy_zones} zonen` : 'keine'} · beaconing {status.beacon ? `an (${fmtNum(status.beacon_pairs)} paare)` : 'aus'} · schleichend {status.drift ? `an (${status.drift_rising} steigend)` : 'aus'} · mails {status.mail ? (mailKinds.length ? 'an' : 'an, aber alle arten aus') : 'aus'}
             </div>
             {#if status.mail && mailKinds.length}
               <div class="mt-1 text-[11px] text-ctp-overlay0" title="[anomaly] mail_min_severity und mail_kinds">mails für: {mailKinds.join(', ')}</div>
@@ -443,6 +443,16 @@
                       {/if}
                     </div>
                     <div class="mt-1 text-ctp-overlay0">nur ein hinweis: auch updates, push-dienste oder geräte, die ihren status melden, verbinden sich regelmäßig</div>
+                  {:else if r.kind === 'drift'}
+                    <div class="mb-1 text-ctp-overlay1">verglichen mit: {r.detail.slot ?? '–'}</div>
+                    <div class="flex flex-wrap gap-2">
+                      <span class="chip">{r.detail.name} <span class="text-ctp-text">{fmtBytes(r.detail.value)}</span> · typisch {fmtBytes(r.detail.typical)}</span>
+                      <span class="chip">{fmtBytes(r.detail.excess)} mehr als typisch</span>
+                      <span class="chip">seit {fmtDate(r.detail.since_ms)} · {r.detail.windows} fenster</span>
+                      <span class="chip" title="summe aus min(z, z_threshold) − k je fenster, gemeldet ab h">cusum {r.detail.cusum} (k {r.detail.k}, h {r.detail.h})</span>
+                    </div>
+                    <div class="mt-1 text-ctp-overlay0">in keinem einzelnen fenster auffällig, aber über längere zeit dauerhaft leicht erhöht – auch ein neuer cloud-sync kann so aussehen</div>
+                    {@render hostContext(r.detail.context, r.geo)}
                   {:else if r.kind === 'country'}
                     <div>{flag(r.detail.cc)} {r.detail.cc} · {fmtBytes(r.detail.bytes)} hochgeladen im ersten fenster</div>
                     {#if r.detail.peers?.length}

@@ -171,6 +171,7 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `anomaly.beacon_min_connections` / `beacon_min_minutes` / `beacon_max_jitter` | `20` / `120` / `0.2` | Muster ab so vielen Verbindungen über so viele Minuten mit höchstens dieser relativen Streuung der Abstände |
 | `anomaly.beacon_max_hosts` | `3` | ab so vielen Hosts mit demselben Muster zum selben Anbieter und Port gilt es als ausgerollte Software (höher = **mehr** Meldungen) |
 | `anomaly.beacon_allow` / `beacon_allow_asn` / `beacon_allow_ports` | leer / leer / `[123]` | Ausnahmen: Hosts oder Ziele (IP/CIDR), Anbieter (ASN, [Liste](FEATURES_de.md#häufige-harmlose-anbieter)), Zielports |
+| `anomaly.drift` / `drift_k` / `drift_h` / `drift_min_mb` | `true` / `0.5` / `10` / `250` | schleichender Anstieg des Uploads (CUSUM): Toleranz, Grenze der Summe, Mindest-Mehrmenge in MiB, siehe [CUSUM](FEATURES_de.md#5-schleichender-anstieg-cusum) |
 | `anomaly.ml` / `ml_threshold` / `ml_training_days` | `true` / `0.65` / `14` | Isolation Forest |
 | `anomaly.event_retention_days` | `30` | Aufbewahrung der Auffälligkeiten |
 | `anomaly.timezone` | leer | Zeitzone für Wochentag/Stunde, leer = System |
