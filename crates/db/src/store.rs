@@ -73,15 +73,79 @@ pub(crate) fn attach<'c>(conn: &'c Connection, path: &Path, name: &'static str) 
 }
 
 /// Höchste Zeilen-ID einer Stundendatei – ohne Löschungen gleich der Zahl der Flows, ohne einen Scan.
+/// Eine Datei ohne Tabelle `flows` (z. B. bei voller Platte leer angelegt) zählt als 0.
 pub(crate) fn count_flows(path: &Path) -> rusqlite::Result<i64> {
     let conn = Connection::open(path)?;
+    if !has_flows(&conn)? {
+        return Ok(0);
+    }
     conn.query_row("SELECT COALESCE(MAX(id), 0) FROM flows", [], |r| r.get(0))
 }
 
-/// Ältester bzw. jüngster Flow einer Stundendatei.
+/// Ältester bzw. jüngster Flow einer Stundendatei (`None` auch ohne Tabelle `flows`).
 pub(crate) fn ts_bound(path: &Path, newest: bool) -> rusqlite::Result<Option<i64>> {
     let conn = Connection::open(path)?;
+    if !has_flows(&conn)? {
+        return Ok(None);
+    }
     conn.query_row(if newest { "SELECT MAX(ts) FROM flows" } else { "SELECT MIN(ts) FROM flows" }, [], |r| r.get(0))
+}
+
+fn has_flows(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'flows')", [], |r| r.get(0))
+}
+
+/// Endung, unter der eine unlesbare Stundendatei beiseitegelegt wird (fällt aus [`list_hours`] heraus).
+pub(crate) const BROKEN_EXT: &str = ".defekt";
+
+/// Stundendateien prüfen, bevor ein Speicher geöffnet wird. Passiert z. B. bei voller Platte: die Datei ist angelegt,
+/// die Tabelle aber nie geschrieben worden. Solche Dateien ohne Tabelle `flows` enthalten keine Flows und werden
+/// gelöscht; Dateien, die SQLite gar nicht lesen kann, werden als `*.db.defekt` beiseitegelegt (nicht gelöscht – zum
+/// Nachsehen). Rückgabe: (gelöscht, beiseitegelegt).
+pub(crate) fn repair_hours(dir: &Path) -> std::io::Result<(usize, usize)> {
+    let (mut removed, mut broken) = (0, 0);
+    for (_, path) in list_hours(dir, "")? {
+        let check = Connection::open(&path).and_then(|conn| {
+            let ok = has_flows(&conn)?;
+            if ok {
+                // Kopf und Schema lesbar; ein schneller Blick auf die Tabelle selbst
+                conn.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM flows LIMIT 1)", [], |_| Ok(()))?;
+            }
+            Ok(ok)
+        });
+        match check {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(file = %path.display(), "Stundendatei ohne Tabelle flows (leer, z. B. nach voller Platte) – gelöscht");
+                remove_file(&path, false)?;
+                removed += 1;
+            }
+            Err(err) => {
+                tracing::error!(file = %path.display(), %err, "Stundendatei unlesbar – als {BROKEN_EXT} beiseitegelegt");
+                for suffix in ["", "-wal"] {
+                    let p = with_suffix(&path, suffix);
+                    if p.exists() {
+                        std::fs::rename(&p, with_suffix(&p, BROKEN_EXT))?;
+                    }
+                }
+                let _ = std::fs::remove_file(with_suffix(&path, "-shm"));
+                broken += 1;
+            }
+        }
+    }
+    Ok((removed, broken))
+}
+
+/// Freier (für normale Prozesse nutzbarer) und gesamter Platz des Dateisystems, auf dem `path` liegt.
+pub(crate) fn disk_space(path: &Path) -> std::io::Result<(u64, u64)> {
+    let st = rustix::fs::statvfs(path)?;
+    Ok((st.f_bavail.saturating_mul(st.f_frsize), st.f_blocks.saturating_mul(st.f_frsize)))
+}
+
+/// Gerät (Dateisystem), auf dem `path` liegt
+pub(crate) fn device(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.dev())
 }
 
 /// Stundendatei abschließen: WAL zurückschreiben und auf Rollback-Journal umstellen. Danach ist sie genau eine Datei, die

@@ -273,6 +273,15 @@ impl History {
         Ok(())
     }
 
+    /// Ältestes Archiv löschen (für den Plattenplatz-Wächter). Rückgabe: ob eines da war.
+    pub(crate) fn drop_oldest_archive(&self) -> Result<bool> {
+        let Some(oldest) = self.list_archives()?.pop() else { return Ok(false) };
+        self.close_view_if(&oldest.name);
+        std::fs::remove_dir_all(self.inner.config.archive_dir.join(&oldest.name))?;
+        tracing::warn!(archive = %oldest.name, bytes = oldest.bytes, "Plattenplatz: ältestes Archiv gelöscht");
+        Ok(true)
+    }
+
     pub async fn status(&self) -> Result<HistoryStatus> {
         let range = match self.current() {
             Ok(db) => db.time_range().await?,

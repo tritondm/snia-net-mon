@@ -12,4 +12,5 @@ tokio.workspace = true
 serde.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+rustix = { version = "1", features = ["fs"] }
 zstd = { version = "0.14", features = ["zstdmt"] }

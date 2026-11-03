@@ -9,7 +9,7 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn open_live(dir: &Path, retention_hours: u64, secure_delete: bool) -> Database {
-    Database::open(&DbConfig { dir: dir.join("live"), retention_hours, cleanup_interval: Duration::from_secs(60), secure_delete }).unwrap()
+    Database::open(&DbConfig { dir: dir.join("live"), retention_hours, cleanup_interval: Duration::from_secs(60), secure_delete, disk: DiskGuard::default() }).unwrap()
 }
 
 fn temp_db(name: &str) -> (Database, PathBuf) {
@@ -657,4 +657,47 @@ async fn bench_cleanup_with_and_without_secure_delete() {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+#[tokio::test]
+async fn empty_and_broken_hour_files_do_not_block_opening() {
+    let dir = temp_dir("broken-hours");
+    let live = dir.join("live");
+    std::fs::create_dir_all(&live).unwrap();
+    let hour = hour_of(now_ms()) - HOUR_MS;
+    // 0 Byte wie nach voller Platte, und eine Datei, die gar keine SQLite-Datenbank ist
+    std::fs::write(live.join(store::hour_name(hour)), b"").unwrap();
+    std::fs::write(live.join(store::hour_name(hour - HOUR_MS)), vec![b'x'; 8192]).unwrap();
+    let db = open_live(&dir, 72, false);
+    assert!(store::list_hours(db.dir(), "").unwrap().is_empty());
+    assert!(live.join(format!("{}{}", store::hour_name(hour - HOUR_MS), store::BROKEN_EXT)).exists());
+    ingest(&db, vec![flow(hour + 1000, "10.0.0.1", "192.0.2.9", 443, 100)]).await;
+    assert_eq!(hour_files(&db), vec![(hour, 1)]);
+    assert_eq!(db.stats().await.unwrap().rows, 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn counting_tolerates_hour_files_without_table() {
+    let dir = temp_dir("no-table");
+    let path = dir.join(store::hour_name(0));
+    std::fs::write(&path, b"").unwrap();
+    assert_eq!(store::count_flows(&path).unwrap(), 0);
+    assert_eq!(store::ts_bound(&path, true).unwrap(), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn disk_guard_drops_oldest_live_hours_but_keeps_the_newest() {
+    let (db, dir) = temp_db("disk-guard");
+    db.accept_late_flows();
+    let now_hour = hour_of(now_ms());
+    let flows = (0..5).map(|i| flow(now_hour - i * HOUR_MS + 1000, "10.0.0.1", "192.0.2.9", 443, 100)).collect();
+    ingest(&db, flows).await;
+    assert_eq!(hour_files(&db).len(), 5);
+    let keep_from = now_hour - (DISK_KEEP_LIVE_HOURS - 1) * HOUR_MS;
+    while db.drop_oldest_hour(keep_from).unwrap() {}
+    assert_eq!(hour_files(&db), vec![(now_hour - HOUR_MS, 1), (now_hour, 1)]);
+    assert_eq!(db.stats().await.unwrap().rows, 2);
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -77,7 +77,23 @@ pub struct DbConfig {
     /// Gelöschte Inhalte überschreiben: in `index.db` per `PRAGMA secure_delete` samt Bereinigung von WAL und freien
     /// Seiten, gelöschte Stundendateien vor dem Entfernen mit Nullen.
     pub secure_delete: bool,
+    /// Plattenplatz-Wächter, siehe [`DiskGuard`]
+    pub disk: DiskGuard,
 }
+
+/// Plattenplatz-Wächter für alle Speicher (live, Historie, Archiv).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiskGuard {
+    /// Unterschreitet der freie Platz diese Grenze, werden die ältesten Daten gelöscht – erst Archive, dann Stunden der
+    /// Historie, zuletzt Live-Stunden (außer den letzten [`DISK_KEEP_LIVE_HOURS`]) – bis wieder so viel frei ist.
+    /// 0 = aus.
+    pub min_free_bytes: u64,
+    /// Darunter speichert der Writer keine Flows mehr (Notreserve: SQLite soll keine Datei halb anlegen). 0 = aus.
+    pub stop_free_bytes: u64,
+}
+
+/// So viele jüngste Live-Stunden löscht der Plattenplatz-Wächter nie.
+pub const DISK_KEEP_LIVE_HOURS: i64 = 2;
 
 #[derive(Debug, Default)]
 struct Counters {
@@ -88,6 +104,12 @@ struct Counters {
     last_cleanup_ms: AtomicI64,
     write_batches: AtomicU64,
     last_write_micros: AtomicU64,
+    /// Flows, die wegen zu wenig Plattenplatz nicht gespeichert wurden
+    disk_dropped: AtomicU64,
+    /// Freier Platz unter `min_free_bytes` (bei der letzten Prüfung)
+    disk_low: AtomicBool,
+    /// Writer pausiert (freier Platz unter `stop_free_bytes`)
+    disk_stopped: AtomicBool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +125,14 @@ pub struct DbStats {
     pub file_bytes: u64,
     pub write_batches: u64,
     pub last_write_micros: u64,
+    /// Freier und gesamter Platz auf dem Dateisystem der Live-Daten
+    pub disk_free_bytes: u64,
+    pub disk_total_bytes: u64,
+    pub disk_min_free_bytes: u64,
+    /// Freier Platz unter `storage.min_free_gb` – älteste Daten werden gelöscht
+    pub disk_low: bool,
+    /// Flows, die wegen voller Platte (unter `storage.stop_free_gb`) nicht gespeichert wurden
+    pub disk_dropped_flows: u64,
 }
 
 /// Handle auf den Speicher. Günstig zu klonen.
@@ -121,6 +151,7 @@ struct Inner {
     moved_until: AtomicI64,
     cleanup_interval: Duration,
     secure_delete: bool,
+    disk: DiskGuard,
     /// Verbindungen auf `index.db`
     readers: Mutex<Vec<Connection>>,
     /// Lesende Abfragen halten die Lese-Sperre, solange sie Stundendateien angehängt haben; Verschieben und Löschen von
@@ -141,7 +172,8 @@ impl Database {
         if retention_hours != config.retention_hours {
             tracing::warn!(requested = config.retention_hours, used = retention_hours, "Retention auf 1–72 Stunden begrenzt");
         }
-        let db = Self::create(&config.dir, None, Some((retention_hours as i64 * HOUR_MS, retention_hours)), config.cleanup_interval, config.secure_delete)?;
+        let mut db = Self::create(&config.dir, None, Some((retention_hours as i64 * HOUR_MS, retention_hours)), config.cleanup_interval, config.secure_delete)?;
+        Arc::get_mut(&mut db.inner).expect("frisch angelegt").disk = config.disk;
         // Zeilenzahl aus den höchsten IDs der Stundendateien: ein Indexzugriff pro Datei statt eines Scans
         let mut rows = 0;
         for (_, path) in store::list_hours(&config.dir, "")? {
@@ -163,6 +195,12 @@ impl Database {
 
     fn create(dir: &Path, packed: Option<PathBuf>, retention: Option<(i64, u64)>, cleanup_interval: Duration, secure_delete: bool) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
+        if packed.is_none() {
+            let (removed, broken) = store::repair_hours(dir)?;
+            if removed + broken > 0 {
+                tracing::warn!(dir = %dir.display(), removed, broken, "Defekte Stundendateien bereinigt");
+            }
+        }
         let conn = schema::open_connection(&dir.join(store::INDEX), secure_delete)?;
         schema::create_index(&conn)?;
         Ok(Self {
@@ -173,6 +211,7 @@ impl Database {
                 moved_until: AtomicI64::new(0),
                 cleanup_interval,
                 secure_delete,
+                disk: DiskGuard::default(),
                 readers: Mutex::new(Vec::new()),
                 files: RwLock::new(()),
                 unpack: Mutex::new(()),
@@ -261,6 +300,19 @@ impl Database {
                         Err(_) => break,
                     }
                 }
+                let full = db.disk_full();
+                if full != db.inner.counters.disk_stopped.swap(full, Relaxed) {
+                    if full {
+                        tracing::error!("Platte fast voll (unter storage.stop_free_gb) – Flows werden nicht gespeichert, bis wieder Platz frei ist");
+                    } else {
+                        tracing::info!("Wieder genug Plattenplatz – Flows werden wieder gespeichert");
+                    }
+                }
+                if full {
+                    db.inner.counters.disk_dropped.fetch_add(rows as u64, Relaxed);
+                    pending.clear();
+                    continue;
+                }
                 let started = Instant::now();
                 let mut result = db.insert_batches(&mut conn, &mut attached, &pending);
                 for attempt in 2..=WRITE_ATTEMPTS {
@@ -307,9 +359,16 @@ impl Database {
             if !attached.contains(&hour) {
                 let name = writer_schema(hour);
                 conn.execute(&format!("ATTACH DATABASE ?1 AS {name}"), [self.inner.dir.join(store::hour_name(hour)).to_string_lossy()])?;
+                // Erst als angehängt merken, wenn die Tabelle steht – sonst bliebe nach einem Fehler (Platte voll) eine
+                // Datei ohne Tabelle angehängt und jeder weitere Batch scheiterte an "no such table".
+                let setup = conn
+                    .query_row(&format!("PRAGMA {name}.journal_mode = WAL"), [], |_| Ok(()))
+                    .and_then(|_| schema::create_flows(conn, &name));
+                if let Err(err) = setup {
+                    let _ = conn.execute_batch(&format!("DETACH DATABASE {name}"));
+                    return Err(err.into());
+                }
                 attached.insert(hour);
-                conn.query_row(&format!("PRAGMA {name}.journal_mode = WAL"), [], |_| Ok(()))?;
-                schema::create_flows(conn, &name)?;
             }
         }
         let tx = conn.transaction()?;
@@ -386,6 +445,12 @@ impl Database {
                         }
                         if let Some(history) = &history {
                             history.maintain().await;
+                        }
+                        let (d, h) = (db.clone(), history.clone());
+                        match tokio::task::spawn_blocking(move || d.guard_disk(h.as_ref())).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => tracing::error!(%err, "Plattenplatz-Prüfung fehlgeschlagen"),
+                            Err(err) => tracing::error!(%err, "Plattenplatz-Prüfung abgebrochen"),
                         }
                     }
                     _ = shutdown.changed() => if *shutdown.borrow() { return },
@@ -501,10 +566,95 @@ impl Database {
         Ok(total)
     }
 
+    // -------------------------------------------------------------------------------------------------- Plattenplatz
+
+    /// Freier Platz unter der Notreserve `stop_free_bytes`: keine Flows mehr schreiben.
+    fn disk_full(&self) -> bool {
+        let stop = self.inner.disk.stop_free_bytes;
+        stop > 0 && store::disk_space(&self.inner.dir).is_ok_and(|(free, _)| free < stop)
+    }
+
+    /// Freier Platz unter `min_free_bytes` auf einem der Dateisysteme von live, Historie oder Archiv: dort die ältesten
+    /// Daten löschen, bis wieder genug frei ist – erst Archive, dann Stunden der Historie, zuletzt Live-Stunden (die
+    /// jüngsten [`DISK_KEEP_LIVE_HOURS`] bleiben immer). Blockierend.
+    pub fn guard_disk(&self, history: Option<&History>) -> Result<()> {
+        let min = self.inner.disk.min_free_bytes;
+        if min == 0 {
+            return Ok(());
+        }
+        let mut dirs = vec![self.inner.dir.clone()];
+        if let Some(h) = history {
+            dirs.push(h.config().dir.clone());
+            dirs.push(h.config().archive_dir.clone());
+        }
+        let low = |dirs: &[PathBuf]| -> Vec<(PathBuf, u64)> {
+            dirs.iter().filter_map(|d| store::disk_space(d).ok().filter(|(free, _)| *free < min).map(|(free, _)| (d.clone(), free))).collect()
+        };
+        let mut short = low(&dirs);
+        let was_low = self.inner.counters.disk_low.swap(!short.is_empty(), Relaxed);
+        if short.is_empty() {
+            if was_low {
+                tracing::info!("Plattenplatz wieder ausreichend");
+            }
+            return Ok(());
+        }
+        let (dir, free) = &short[0];
+        tracing::warn!(dir = %dir.display(), free_mb = free / 1024 / 1024, min_free_mb = min / 1024 / 1024,
+            "Wenig Plattenplatz – älteste Daten werden gelöscht");
+        let mut freed_steps = 0usize;
+        // Höchstens so viele Schritte pro Lauf; der nächste Cleanup-Lauf macht weiter
+        while !short.is_empty() && freed_steps < 500 {
+            let devs: Vec<u64> = short.iter().filter_map(|(d, _)| store::device(d)).collect();
+            let on_low = |p: &Path| store::device(p).is_some_and(|d| devs.contains(&d));
+            let mut progressed = false;
+            if let Some(h) = history {
+                if on_low(&h.config().archive_dir) && h.drop_oldest_archive()? {
+                    progressed = true;
+                } else if on_low(&h.config().dir) && h.current()?.drop_oldest_hour(i64::MAX)? {
+                    progressed = true;
+                }
+            }
+            if !progressed && on_low(&self.inner.dir) {
+                let keep_from = hour_of(now_ms()) - (DISK_KEEP_LIVE_HOURS - 1) * HOUR_MS;
+                progressed = self.drop_oldest_hour(keep_from)?;
+            }
+            if !progressed {
+                tracing::error!(min_free_mb = min / 1024 / 1024,
+                    "Plattenplatz: nichts mehr zu löschen – Platz auf dem Datenträger schaffen oder storage.min_free_gb senken");
+                break;
+            }
+            freed_steps += 1;
+            short = low(&dirs);
+        }
+        if short.is_empty() {
+            tracing::info!(steps = freed_steps, "Plattenplatz wieder ausreichend");
+        }
+        Ok(())
+    }
+
+    /// Älteste Stundendatei löschen, sofern sie vor `before` (Stundenbeginn) liegt; Aggregate davor ebenso.
+    /// Rückgabe: ob etwas gelöscht wurde.
+    pub(crate) fn drop_oldest_hour(&self, before: i64) -> Result<bool> {
+        let Some((hour, _)) = store::list_hours(&self.inner.dir, "")?.into_iter().next() else { return Ok(false) };
+        if hour >= before {
+            return Ok(false);
+        }
+        let cutoff = hour + HOUR_MS;
+        let deleted = self.remove_old(cutoff, None, i64::MIN)?;
+        if self.inner.retention.is_some() {
+            let c = &self.inner.counters;
+            c.deleted.fetch_add(deleted as u64, Relaxed);
+            c.rows.fetch_sub(deleted as i64, Relaxed);
+        }
+        tracing::warn!(dir = %self.inner.dir.display(), hour = %store::fmt_utc(hour), flows = deleted, "Plattenplatz: Stunde gelöscht");
+        Ok(true)
+    }
+
     // -------------------------------------------------------------------------------------------------- Status
 
     pub async fn stats(&self) -> Result<DbStats> {
         let (oldest, _) = self.time_range().await?;
+        let disk = store::disk_space(&self.inner.dir).unwrap_or((0, 0));
         let c = &self.inner.counters;
         Ok(DbStats {
             rows: c.rows.load(Relaxed).max(0),
@@ -517,6 +667,11 @@ impl Database {
             file_bytes: store::dir_size(&self.inner.dir),
             write_batches: c.write_batches.load(Relaxed),
             last_write_micros: c.last_write_micros.load(Relaxed),
+            disk_free_bytes: disk.0,
+            disk_total_bytes: disk.1,
+            disk_min_free_bytes: self.inner.disk.min_free_bytes,
+            disk_low: c.disk_low.load(Relaxed),
+            disk_dropped_flows: c.disk_dropped.load(Relaxed),
         })
     }
 

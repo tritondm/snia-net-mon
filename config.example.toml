@@ -47,6 +47,14 @@ cleanup_interval_secs = 60
 # Copy-on-Write-Dateisystemen (btrfs, ZFS) ist das Überschreiben ganzer Dateien nicht garantiert wirksam.
 # false = schneller, gelöschte Inhalte können aber auf der Platte wiederherstellbar bleiben.
 secure_delete = true
+# Plattenplatz-Wächter (gilt für live, Historie und Archiv): Sind auf einem dieser Datenträger weniger als min_free_gb
+# frei, werden die ältesten Daten gelöscht – erst Archive, dann Stunden der Historie, zuletzt Live-Stunden (die letzten
+# 2 Stunden bleiben immer) –, bis wieder genug frei ist. Mit [email] geht eine Warnung an die Admins (höchstens alle 12 h).
+# 0 = aus.
+min_free_gb = 5
+# Notreserve: unter so viel freiem Platz werden keine Flows mehr gespeichert (Live-Ansicht und Alarme laufen weiter).
+# Verhindert halb angelegte Stundendateien bei voller Platte. 0 = aus.
+stop_free_gb = 1
 
 [history]
 # Stunden nach dem Live-Fenster in ein eigenes Verzeichnis verschieben. false = löschen (keine Historie, kein Archiv).

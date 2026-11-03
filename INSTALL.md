@@ -148,6 +148,8 @@ A single file: `cp config.example.toml config.toml`. All keys are commented ther
 | `storage.dir` | `data/live` | live data: `index.db` and one file per hour, see [storage](FEATURES.md#storage-one-sqlite-file-per-hour) |
 | `storage.retention_hours` | `48` | live window; values above 72 are capped at 72 |
 | `storage.secure_delete` | `true` | overwrite deleted data (also applies to the history), see [storage](FEATURES.md#storage-one-sqlite-file-per-hour) |
+| `storage.min_free_gb` | `5` | disk space guard: below this, the oldest data is deleted (archive → history → live, the last 2 h are kept) and the admins are warned by mail; `0` = off |
+| `storage.stop_free_gb` | `1` | emergency reserve: below this, no flows are stored; `0` = off |
 | `history.enabled` | `true` | move hours after the live window into the history (`false` = delete) |
 | `history.dir` | `data/history` | history directory (same layout as `storage.dir`) |
 | `history.max_size_gb` | `50` | from this size the history is rotated into the archive |

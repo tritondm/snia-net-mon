@@ -89,12 +89,27 @@ struct StorageSection {
     cleanup_interval_secs: u64,
     /// Gelöschte Flows in der Datei überschreiben (gilt auch für die Historie)
     secure_delete: bool,
+    /// Plattenplatz-Wächter: darunter (GB frei) werden die ältesten Daten gelöscht und die Admins benachrichtigt. 0 = aus.
+    min_free_gb: f64,
+    /// Notreserve (GB frei): darunter werden keine Flows mehr gespeichert. 0 = aus.
+    stop_free_gb: f64,
 }
 
 impl Default for StorageSection {
     fn default() -> Self {
-        Self { dir: "data/live".into(), retention_hours: 48, cleanup_interval_secs: 60, secure_delete: true }
+        Self {
+            dir: "data/live".into(),
+            retention_hours: 48,
+            cleanup_interval_secs: 60,
+            secure_delete: true,
+            min_free_gb: 5.0,
+            stop_free_gb: 1.0,
+        }
     }
+}
+
+fn gb_to_bytes(gb: f64) -> u64 {
+    (gb.max(0.0) * 1024.0 * 1024.0 * 1024.0) as u64
 }
 
 /// Historie: Flows nach dem Live-Fenster, bis `max_size_gb`; danach Rotation in ein zstd-Archiv.
@@ -487,6 +502,39 @@ fn load_config(path: Option<PathBuf>) -> Result<Config> {
     }
 }
 
+/// Mail an die Admins, sobald der Plattenplatz-Wächter anschlägt – höchstens alle 12 Stunden.
+fn spawn_disk_mail(database: db::Database, mailer: alert::Mailer, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        let mut last_mail: Option<std::time::Instant> = None;
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = shutdown.changed() => if *shutdown.borrow() { return } else { continue },
+            }
+            let Ok(stats) = database.stats().await else { continue };
+            if !stats.disk_low || last_mail.is_some_and(|t| t.elapsed() < Duration::from_secs(12 * 3600)) {
+                continue;
+            }
+            let gb = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
+            let body = format!(
+                "Auf dem Datenträger von Snia-Net-Mon ist wenig Platz frei: {:.1} GB von {:.1} GB (Grenze storage.min_free_gb = {:.1} GB).\n\n\
+                 Die ältesten Daten werden automatisch gelöscht (erst Archive, dann Historie, zuletzt Live-Stunden).\n\
+                 Wegen voller Platte nicht gespeicherte Flows bisher: {}\n\n\
+                 Abhilfe: Platte vergrößern oder history.max_size_gb / history.archive_retention_days senken.\n",
+                gb(stats.disk_free_bytes),
+                gb(stats.disk_total_bytes),
+                gb(stats.disk_min_free_bytes),
+                stats.disk_dropped_flows,
+            );
+            match mailer.send("[snia-net-mon] Wenig Plattenplatz", &body).await {
+                Ok(()) => last_mail = Some(std::time::Instant::now()),
+                Err(err) => tracing::warn!(%err, "Plattenplatz-Mail fehlgeschlagen"),
+            }
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -514,8 +562,15 @@ async fn main() -> Result<()> {
         retention_hours: config.storage.retention_hours,
         cleanup_interval: Duration::from_secs(config.storage.cleanup_interval_secs.clamp(10, 3600)),
         secure_delete: config.storage.secure_delete,
+        disk: db::DiskGuard {
+            min_free_bytes: gb_to_bytes(config.storage.min_free_gb),
+            stop_free_bytes: gb_to_bytes(config.storage.stop_free_gb),
+        },
     })
     .context("Datenbank konnte nicht geöffnet werden")?;
+    if config.storage.min_free_gb > 0.0 {
+        tracing::info!(min_free_gb = config.storage.min_free_gb, stop_free_gb = config.storage.stop_free_gb, "Plattenplatz-Wächter aktiv");
+    }
     let history = if config.history.enabled {
         let h = &config.history;
         let history = db::History::open(db::HistoryConfig {
@@ -571,6 +626,7 @@ async fn main() -> Result<()> {
 
     // --- Upload-Alarm und Anomalie-Erkennung
     let mailer = config.email.mailer()?;
+    let disk_mail = mailer.clone().map(|m| spawn_disk_mail(database.clone(), m, shutdown_rx.clone()));
     let anomaly = if config.anomaly.enabled {
         let (anomaly_tx, anomaly_rx) = mpsc::channel(256);
         sinks.push(anomaly_tx);
@@ -665,6 +721,9 @@ async fn main() -> Result<()> {
         let _ = handle.await;
     }
     let _ = cleanup.await;
+    if let Some(task) = disk_mail {
+        let _ = task.await;
+    }
     if let Some(watch) = upload_watch {
         let _ = watch.await;
     }

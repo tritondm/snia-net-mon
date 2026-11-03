@@ -148,6 +148,8 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `storage.dir` | `data/live` | Live-Daten: `index.db` und eine Datei pro Stunde, siehe [Speicher](FEATURES_de.md#speicher-eine-sqlite-datei-pro-stunde) |
 | `storage.retention_hours` | `48` | Live-Fenster; Werte über 72 werden auf 72 begrenzt |
 | `storage.secure_delete` | `true` | gelöschte Daten überschreiben (gilt auch für die Historie), siehe [Speicher](FEATURES_de.md#speicher-eine-sqlite-datei-pro-stunde) |
+| `storage.min_free_gb` | `5` | Plattenplatz-Wächter: darunter werden die ältesten Daten gelöscht (Archiv → Historie → Live, die letzten 2 h bleiben) und die Admins per Mail gewarnt; `0` = aus |
+| `storage.stop_free_gb` | `1` | Notreserve: darunter werden keine Flows mehr gespeichert; `0` = aus |
 | `history.enabled` | `true` | Stunden nach dem Live-Fenster in die Historie verschieben (`false` = löschen) |
 | `history.dir` | `data/history` | Verzeichnis der Historie (gleicher Aufbau wie `storage.dir`) |
 | `history.max_size_gb` | `50` | ab dieser Größe wird die Historie ins Archiv rotiert |
