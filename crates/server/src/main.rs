@@ -181,6 +181,7 @@ struct AnomalySection {
     dns_servers: Vec<String>,
     dns_clients: Vec<String>,
     new_country: bool,
+    country_learning_days: u64,
     ml: bool,
     ml_threshold: f64,
     ml_training_days: u64,
@@ -202,6 +203,8 @@ struct AnomalySection {
     beacon_allow: Vec<String>,
     beacon_allow_asn: Vec<u32>,
     beacon_allow_ports: Vec<u16>,
+    /// Ab so vielen internen Hosts mit Verbindungen zur selben Ziel-IP gilt das Ziel als verbreiteter Dienst; 0 = aus
+    beacon_popular_hosts: usize,
     /// Schleichender Anstieg des Uploads (CUSUM)
     drift: bool,
     drift_k: f64,
@@ -237,6 +240,7 @@ impl Default for AnomalySection {
             dns_servers: Vec::new(),
             dns_clients: Vec::new(),
             new_country: d.new_country,
+            country_learning_days: d.country_learning_days,
             ml: d.ml,
             ml_threshold: d.ml_threshold,
             ml_training_days: d.ml_training_days,
@@ -255,6 +259,7 @@ impl Default for AnomalySection {
             beacon_allow: Vec::new(),
             beacon_allow_asn: Vec::new(),
             beacon_allow_ports: d.beacon.allow_ports.iter().copied().collect(),
+            beacon_popular_hosts: d.beacon.popular_hosts,
             drift: d.drift.enabled,
             drift_k: d.drift.k,
             drift_h: d.drift.h,
@@ -310,6 +315,7 @@ impl AnomalySection {
             dns_servers: nets("dns_servers", &self.dns_servers)?,
             dns_clients: nets("dns_clients", &self.dns_clients)?,
             new_country: self.new_country,
+            country_learning_days: self.country_learning_days.min(90),
             ml: self.ml,
             ml_threshold: self.ml_threshold.clamp(0.5, 1.0),
             ml_training_days: self.ml_training_days.clamp(1, 90),
@@ -330,6 +336,7 @@ impl AnomalySection {
                 allow: nets("beacon_allow", &self.beacon_allow)?,
                 allow_asn: self.beacon_allow_asn.iter().copied().collect(),
                 allow_ports: self.beacon_allow_ports.iter().copied().collect(),
+                popular_hosts: self.beacon_popular_hosts,
             },
             drift: anomaly::drift::DriftConfig {
                 enabled: self.drift,

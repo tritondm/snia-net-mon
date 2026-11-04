@@ -166,6 +166,8 @@ pub(crate) struct Engine {
     store: Store,
     baselines: Baselines,
     countries: HashMap<String, HashSet<String>>,
+    /// erste Verbindung je Gruppe – neue Gruppen (VPN-Pools, Hotspots) lernen ihre Länder erst eine Weile
+    group_since: HashMap<String, i64>,
     model: Option<Model>,
     started_ms: i64,
     /// laufende Auffälligkeiten zum Verlängern: Host, Art, Tag, Ausnahme
@@ -198,6 +200,7 @@ impl Engine {
         };
         let baselines = Baselines::from_profiles(store.load_baselines()?);
         let countries = store.load_countries()?;
+        let group_since = store.group_since()?;
         // Ausnahmen können abgelaufen sein, während der Server aus war
         let exceptions = Exceptions::from_rows(&store.exceptions()?);
         store.assign_exceptions(&exceptions, now)?;
@@ -208,6 +211,7 @@ impl Engine {
             store,
             baselines,
             countries,
+            group_since,
             model: None,
             started_ms,
             open: HashMap::new(),
@@ -302,10 +306,21 @@ impl Engine {
             }
             // Länder, die der Host nur als Server beantwortet hat (Clients von dort), lernt die Gruppe nicht – sonst bliebe
             // eine spätere eigene Verbindung dorthin unbemerkt
+            // Link-local-Adressen (169.254/16, fe80::/10) haben keine echte Vorgeschichte – nur lernen, nie melden
+            let link_local = match ip {
+                IpAddr::V4(v4) => v4.is_link_local(),
+                IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 == 0xfe80,
+            };
+            let group_learned = if h.countries.values().any(|c| c.opened) {
+                let since = *self.group_since.entry(group.clone()).or_insert(end);
+                end - since >= self.cfg.country_learning_days as i64 * DAY_MS
+            } else {
+                false
+            };
             for (cc, c) in h.countries.iter().filter(|(_, c)| c.opened) {
                 if self.countries.entry(group.clone()).or_default().insert(cc.clone()) {
                     self.store.add_country(&group, cc, end)?;
-                    if learned && self.cfg.new_country {
+                    if learned && group_learned && !link_local && self.cfg.new_country {
                         found.push(country_event(end, &host, &group, cc, c.bytes, h, &window));
                     }
                 }
@@ -862,7 +877,7 @@ mod tests {
     fn config(name: &str) -> AnomalyConfig {
         let dir = std::env::temp_dir().join(format!("snm-anomaly-engine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        AnomalyConfig { db_path: dir.join("anomaly.db"), learning_days: 0, timezone: Some("UTC".into()), ..AnomalyConfig::default() }
+        AnomalyConfig { db_path: dir.join("anomaly.db"), learning_days: 0, country_learning_days: 0, timezone: Some("UTC".into()), ..AnomalyConfig::default() }
     }
 
     fn flow(src: &str, dst: &str, dst_port: u16, bytes: u64, flags: u8, direction: Direction) -> FlowRecord {
@@ -1097,7 +1112,7 @@ mod tests {
 
     #[test]
     fn regular_connections_to_one_target_are_reported_as_beaconing() {
-        let cfg = AnomalyConfig { learning_days: 7, ..config("beacon") };
+        let cfg = AnomalyConfig { learning_days: 7, beacon: beacon::BeaconConfig { min_minutes: 120, ..Default::default() }, ..config("beacon") };
         let path = cfg.db_path.clone();
         let mut engine = Engine::open(cfg, 0).unwrap();
         let geo = geo::GeoLookup::disabled();
@@ -1147,6 +1162,29 @@ mod tests {
         assert_eq!(countries[0].title, "erste verbindung der gruppe 10.0.1.0/24 nach FR: 198.51.100.7:443 (500 B hochgeladen)");
         assert_eq!(countries[0].detail["peers"][0]["ip"], "198.51.100.7");
         assert!(!engine.countries["10.0.1.0/24"].contains("ES"), "nur beantwortete Länder werden nicht gelernt");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn new_groups_and_link_local_hosts_learn_countries_silently() {
+        let cfg = AnomalyConfig { country_learning_days: 3, ..config("country-groups") };
+        let path = cfg.db_path.clone();
+        let mut engine = Engine::open(cfg, 0).unwrap();
+        let window = |start: i64, ip: &str, cc: &str| {
+            let mut w = Window::new(start, true);
+            let host = w.hosts.entry(ip.parse().unwrap()).or_default();
+            host.countries.insert(cc.into(), crate::features::CountryUse { bytes: 500, opened: true });
+            w
+        };
+        let count = |events: Vec<Event>| events.iter().filter(|e| e.kind == Kind::Country).count();
+        // neue Gruppe: in den ersten drei Tagen still
+        assert_eq!(count(engine.finish_window(window(0, "10.80.1.5", "FR"), 600_000).unwrap()), 0);
+        assert_eq!(count(engine.finish_window(window(DAY_MS, "10.80.1.5", "NL"), DAY_MS).unwrap()), 0);
+        // danach wieder gemeldet
+        assert_eq!(count(engine.finish_window(window(4 * DAY_MS, "10.80.1.5", "SE"), 4 * DAY_MS).unwrap()), 1);
+        // link-local nie
+        let _ = engine.finish_window(window(0, "169.254.3.4", "AT"), 600_000).unwrap();
+        assert_eq!(count(engine.finish_window(window(4 * DAY_MS, "169.254.3.4", "US"), 4 * DAY_MS).unwrap()), 0);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

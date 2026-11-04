@@ -397,7 +397,7 @@ s(x) = 2^{-\,\frac{\mathrm{E}[h(x)]}{c(\psi)}}, \qquad c(256) \approx 10.24
 | mean path length E[h(x)] | score s(x) | meaning |
 |---|---|---|
 | ≈ 10.2 (= c(ψ)) | 0.50 | average point |
-| 6.4 | 0.65 | default threshold `ml_threshold` |
+| ≈ 5.2 | 0.70 | default threshold `ml_threshold` |
 | 3.3 | 0.80 | clearly unusual |
 | 1.6 | 0.90 | isolated after one or two cuts |
 | → 0 | → 1 | extremely unusual |
@@ -413,7 +413,7 @@ The effective threshold is
 where `Q₀.₉₉₉` is the 99.9 % quantile of the scores on the model's own training data. This way at most 0.1 % of normal
 windows lie above it, even if the network produces higher scores overall. For perspective: 100 active hosts produce
 14,400 host windows per day, 0.1 % of which would be 14 hits. That is why an ML hit on its own is only **info**, and
-`ml_threshold` (0.65) acts as a lower bound in case the quantile is very low. The score distribution (median, 99 %,
+`ml_threshold` (0.70) acts as a lower bound in case the quantile is very low. The score distribution (median, 99 %,
 99.9 %, maximum) is shown in the status card of the web UI and helps with tuning.
 
 The training data also contains the anomalies of the last two weeks. That is not a problem for an Isolation Forest: it
@@ -493,7 +493,7 @@ Pairs `(internal host, external destination, destination port, protocol)` are ob
 records with the same start time are the same connection (active timeout) and count once.
 
 Exceptions from the configuration are not observed: destination ports from `beacon_allow_ports` (default 123, NTP – time
-sync is regular by nature), hosts or destinations from `beacon_allow` and destinations in providers from
+sync is regular by nature – plus the VPN keepalives 500/4500 IPsec, 1194 OpenVPN and 51820 WireGuard), hosts or destinations from `beacon_allow` and destinations in providers from
 `beacon_allow_asn`. DNS (53, 853) to allowed resolvers (`dns_servers`) and from your own DNS servers (`dns_clients`) is
 not observed either – a resolver queries root and domain servers all the time by nature.
 
@@ -519,7 +519,7 @@ beacon if all conditions are met:
 | Condition | Default | Why |
 |---|---|---|
 | `n ≥ beacon_min_connections` | 20 | few points easily look regular by chance |
-| `tₙ − t₁ ≥ beacon_min_minutes` | 120 min | a short pattern is more likely a single session |
+| `tₙ − t₁ ≥ beacon_min_minutes` | 180 min | a short pattern is more likely a single session |
 | `I ≥ 10 s` | fixed | shorter intervals are bursts of connections, e.g. a browser loading a page |
 | `J ≤ beacon_max_jitter` | 0.2 | intervals typically deviate by at most 20 % |
 
@@ -557,6 +557,10 @@ count towards `F`. A single machine with its own pattern thus stays visible, the
 hosts on, the pattern counts as normal". A **higher** value gives **more** reports, a lower one fewer. Only hosts showing
 the pattern *at the same time* are counted, so in small networks the fleet check rarely kicks in. Against many harmless
 hits the exceptions below work better than a different value.
+
+In addition, a destination IP counts as a **widespread service** if at least `beacon_popular_hosts` (default 5)
+internal hosts had any connection to it in the last twelve hours, regular or not. This catches CDN and update servers
+that only one machine polls on a schedule but many others visit now and then. `0` turns this off.
 
 The report names the destination with country and provider, number of connections, interval, spread, typical size and
 duration:

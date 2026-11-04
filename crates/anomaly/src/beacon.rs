@@ -40,8 +40,11 @@ pub struct BeaconConfig {
     pub allow: LocalNetworks,
     /// Ausnahmen: Ziele in diesen autonomen Systemen (z. B. 8075 Microsoft)
     pub allow_asn: HashSet<u32>,
-    /// Ausnahmen: Zielports (Standard 123, NTP)
+    /// Ausnahmen: Zielports (Standard 123 NTP, 500/4500 IPsec, 1194 OpenVPN, 51820 WireGuard – VPN-Keepalives)
     pub allow_ports: HashSet<u16>,
+    /// Haben so viele interne Hosts überhaupt Verbindungen zur selben Ziel-IP (egal ob regelmäßig), ist das Ziel ein
+    /// verbreiteter Dienst (CDN, Update-Server) und wird nicht gemeldet; 0 = aus
+    pub popular_hosts: usize,
 }
 
 impl Default for BeaconConfig {
@@ -49,12 +52,13 @@ impl Default for BeaconConfig {
         Self {
             enabled: true,
             min_connections: 20,
-            min_minutes: 120,
+            min_minutes: 180,
             max_jitter: 0.2,
             max_hosts: 3,
             allow: LocalNetworks::none(),
             allow_asn: HashSet::new(),
-            allow_ports: HashSet::from([123]),
+            allow_ports: HashSet::from([123, 500, 4500, 1194, 51820]),
+            popular_hosts: 5,
         }
     }
 }
@@ -167,6 +171,14 @@ impl Tracker {
         for (_, f) in &patterns {
             fleet.entry(self.fleet_key(&f.key)).or_default().insert(f.key.0);
         }
+        // Wie viele interne Hosts haben überhaupt Verbindungen zur selben Ziel-IP?
+        let mut popular: HashMap<IpAddr, HashSet<IpAddr>> = HashMap::new();
+        if cfg.popular_hosts > 0 {
+            for key in self.pairs.keys() {
+                popular.entry(key.1).or_default().insert(key.0);
+            }
+        }
+        let is_popular = |peer: &IpAddr| cfg.popular_hosts > 0 && popular.get(peer).is_some_and(|h| h.len() >= cfg.popular_hosts);
         let mut found: Vec<Finding> = patterns
             .into_iter()
             .filter(|(updated, _)| *updated)
@@ -175,6 +187,7 @@ impl Tracker {
                 f
             })
             .filter(|f| f.fleet_hosts < cfg.max_hosts.max(1))
+            .filter(|f| !is_popular(&f.key.1))
             .collect();
         found.sort_by_key(|f| (f.key.0, f.key.1, f.key.2));
         found
@@ -270,7 +283,7 @@ mod tests {
     }
 
     fn cfg() -> BeaconConfig {
-        BeaconConfig { max_hosts: 3, ..BeaconConfig::default() }
+        BeaconConfig { max_hosts: 3, min_minutes: 120, ..BeaconConfig::default() }
     }
 
     #[test]
@@ -343,6 +356,21 @@ mod tests {
         let hosts: Vec<IpAddr> = found.iter().map(|f| f.key.0).collect();
         assert_eq!(hosts, vec![ip("10.0.1.20"), ip("10.0.1.21")], "{found:?}");
         assert!(found.iter().all(|f| f.fleet_hosts == 1));
+    }
+
+    #[test]
+    fn targets_many_hosts_talk_to_are_not_reported() {
+        let mut t = Tracker::default();
+        let peer = ip("198.51.100.7");
+        let mut conns = HashMap::new();
+        // ein Host mit regelmäßigem Muster, vier weitere mit nur einer Verbindung zur selben IP
+        conns.insert((ip("10.0.1.5"), peer, 80, 6), series(0, 200, 60_000, 0));
+        for h in 10..14 {
+            conns.insert((ip(&format!("10.0.1.{h}")), peer, 80, 6), vec![(5_000, 300)]);
+        }
+        t.merge(conns, HashMap::new(), 200 * 60_000);
+        assert!(t.analyze(&cfg()).is_empty());
+        assert_eq!(t.analyze(&BeaconConfig { popular_hosts: 0, ..cfg() }).len(), 1);
     }
 
     #[test]

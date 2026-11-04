@@ -168,13 +168,14 @@ A single file: `cp config.example.toml config.toml`. All keys are commented ther
 | `anomaly.scan_threshold` | `100` | port scan from this many failed attempts per window, `0` = off |
 | `anomaly.dns_rule` / `dns_servers` | `true` / empty | report DNS to external resolvers / permitted external resolvers |
 | `anomaly.dns_clients` | empty | internal hosts allowed to resolve externally (own DNS servers, routers) |
-| `anomaly.new_country` | `true` | report the first country of a network group |
+| `anomaly.new_country` / `country_learning_days` | `true` / `3` | report the first country of a network group; new groups learn silently for this many days, link-local (169.254/16) never reports |
 | `anomaly.beacon` | `true` | beaconing detection (only a hint in the web UI, never by mail) |
-| `anomaly.beacon_min_connections` / `beacon_min_minutes` / `beacon_max_jitter` | `20` / `120` / `0.2` | pattern from this many connections over this many minutes with at most this relative spread of the intervals |
+| `anomaly.beacon_min_connections` / `beacon_min_minutes` / `beacon_max_jitter` | `20` / `180` / `0.2` | pattern from this many connections over this many minutes with at most this relative spread of the intervals |
 | `anomaly.beacon_max_hosts` | `3` | from this many hosts with the same pattern to the same provider and port on, it counts as rolled-out software (higher = **more** reports) |
-| `anomaly.beacon_allow` / `beacon_allow_asn` / `beacon_allow_ports` | empty / empty / `[123]` | exceptions: hosts or destinations (IP/CIDR), providers (ASN, [list](FEATURES.md#common-harmless-providers)), destination ports |
+| `anomaly.beacon_popular_hosts` | `5` | from this many internal hosts with any connection to the same destination IP on, it counts as a widespread service (CDN, updates); `0` = off |
+| `anomaly.beacon_allow` / `beacon_allow_asn` / `beacon_allow_ports` | empty / empty / `[123, 500, 4500, 1194, 51820]` | exceptions: hosts or destinations (IP/CIDR), providers (ASN, [list](FEATURES.md#common-harmless-providers)), destination ports |
 | `anomaly.drift` / `drift_k` / `drift_h` / `drift_min_mb` | `true` / `0.5` / `10` / `250` | slowly rising upload (CUSUM): tolerance, limit of the sum, minimum excess in MiB, see [CUSUM](FEATURES.md#5-slow-rise-cusum) |
-| `anomaly.ml` / `ml_threshold` / `ml_training_days` | `true` / `0.65` / `14` | Isolation Forest |
+| `anomaly.ml` / `ml_threshold` / `ml_training_days` | `true` / `0.70` / `14` | Isolation Forest |
 | `anomaly.event_retention_days` | `30` | retention of anomalies |
 | `anomaly.timezone` | empty | time zone for weekday/hour, empty = system |
 | `anomaly.mail` / `mail_min_severity` | `false` / `high` | mails to the admins |

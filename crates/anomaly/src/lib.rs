@@ -100,6 +100,8 @@ pub struct AnomalyConfig {
     /// Fehlgeschlagene Verbindungsversuche je Fenster, ab denen ein Portscan gemeldet wird; 0 = aus
     pub scan_threshold: usize,
     pub new_country: bool,
+    /// Neue Gruppen (erste Verbindung vor weniger als so vielen Tagen) melden keine neuen Länder, sondern lernen nur
+    pub country_learning_days: u64,
     pub ml: bool,
     pub ml_threshold: f64,
     pub ml_training_days: u64,
@@ -141,8 +143,9 @@ impl Default for AnomalyConfig {
             dns_rule: true,
             scan_threshold: 100,
             new_country: true,
+            country_learning_days: 3,
             ml: true,
-            ml_threshold: 0.65,
+            ml_threshold: 0.70,
             ml_training_days: 14,
             event_retention_days: 30,
             timezone: None,

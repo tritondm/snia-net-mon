@@ -396,7 +396,7 @@ s(x) = 2^{-\,\frac{\mathrm{E}[h(x)]}{c(\psi)}}, \qquad c(256) \approx 10{,}24
 | mittlere Pfadlänge E[h(x)] | Score s(x) | Bedeutung |
 |---|---|---|
 | ≈ 10,2 (= c(ψ)) | 0,50 | durchschnittlicher Punkt |
-| 6,4 | 0,65 | Standardschwelle `ml_threshold` |
+| ≈ 5,2 | 0,70 | Standardschwelle `ml_threshold` |
 | 3,3 | 0,80 | deutlich auffällig |
 | 1,6 | 0,90 | nach ein, zwei Schnitten isoliert |
 | → 0 | → 1 | extrem auffällig |
@@ -412,7 +412,7 @@ Die wirksame Schwelle ist
 wobei `Q₀,₉₉₉` das 99,9-%-Quantil der Scores auf den eigenen Trainingsdaten ist. Damit liegen höchstens 0,1 % der
 normalen Fenster darüber, selbst wenn das Netz insgesamt höhere Scores erzeugt. Zur Einordnung: 100 aktive Hosts ergeben
 14.400 Host-Fenster am Tag, 0,1 % davon wären 14 Treffer. Deshalb ist ein ML-Treffer allein nur **info**, und
-`ml_threshold` (0,65) wirkt als Untergrenze, falls das Quantil sehr niedrig liegt. Die Score-Verteilung (Median, 99 %, 99,9 %, Maximum) steht in der
+`ml_threshold` (0,70) wirkt als Untergrenze, falls das Quantil sehr niedrig liegt. Die Score-Verteilung (Median, 99 %, 99,9 %, Maximum) steht in der
 Statuskarte der Web-UI und hilft beim Einstellen.
 
 Die Trainingsdaten enthalten auch die Auffälligkeiten der letzten zwei Wochen. Das ist beim Isolation Forest unkritisch:
@@ -493,7 +493,7 @@ Verbindungen der letzten **12 Stunden** (höchstens 512 je Paar, höchstens 300.
 derselben Startzeit sind dieselbe Verbindung (Active Timeout) und zählen einmal.
 
 Nicht beobachtet werden Ausnahmen aus der Konfiguration: Zielports aus `beacon_allow_ports` (Standard 123, NTP – Zeit-Sync
-ist von Natur aus regelmäßig), Hosts oder Ziele aus `beacon_allow` und Ziele in Anbietern aus `beacon_allow_asn`. DNS (53, 853) zu erlaubten Resolvern
+ist von Natur aus regelmäßig – sowie die VPN-Keepalives 500/4500 IPsec, 1194 OpenVPN und 51820 WireGuard), Hosts oder Ziele aus `beacon_allow` und Ziele in Anbietern aus `beacon_allow_asn`. DNS (53, 853) zu erlaubten Resolvern
 (`dns_servers`) und von eigenen DNS-Servern (`dns_clients`) wird ebenfalls nicht beobachtet – ein Resolver fragt die
 Root- und Domain-Server naturgemäß ständig ab.
 
@@ -519,7 +519,7 @@ Beacon, wenn alle Bedingungen erfüllt sind:
 | Bedingung | Standard | warum |
 |---|---|---|
 | `n ≥ beacon_min_connections` | 20 | wenige Punkte sehen leicht zufällig regelmäßig aus |
-| `tₙ − t₁ ≥ beacon_min_minutes` | 120 min | ein kurzes Muster ist eher eine einzelne Sitzung |
+| `tₙ − t₁ ≥ beacon_min_minutes` | 180 min | ein kurzes Muster ist eher eine einzelne Sitzung |
 | `I ≥ 10 s` | fest | kürzere Abstände sind Verbindungsbündel, etwa ein Browser, der eine Seite lädt |
 | `J ≤ beacon_max_jitter` | 0,2 | Abstände weichen typischerweise höchstens 20 % ab |
 
@@ -558,6 +558,10 @@ neuen Verbindungen hatten. Ein einzelner Rechner mit eigenem Muster bleibt so si
 Hosts gilt das Muster als normal“. Ein **höherer** Wert ergibt **mehr** Meldungen, ein niedrigerer weniger. Gezählt
 werden nur Hosts, die das Muster *gleichzeitig* zeigen; in kleinen Netzen kommt die Flotten-Prüfung deshalb selten zum
 Zug. Gegen viele harmlose Treffer helfen die Ausnahmen unten besser als ein anderer Wert.
+
+Zusätzlich gilt eine Ziel-IP als **verbreiteter Dienst**, wenn mindestens `beacon_popular_hosts` (Standard 5) interne
+Hosts in den letzten zwölf Stunden überhaupt Verbindungen dorthin hatten, egal ob regelmäßig. Das fängt CDN- und
+Update-Server ab, die nur ein Rechner im Takt anfragt, viele andere aber gelegentlich. `0` schaltet das ab.
 
 Die Meldung nennt Ziel samt Land und Anbieter, Anzahl der Verbindungen, Intervall, Streuung, typische Größe und Dauer:
 

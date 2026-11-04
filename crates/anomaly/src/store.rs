@@ -266,6 +266,13 @@ impl Store {
         Ok(map)
     }
 
+    /// Erste bekannte Verbindung je Gruppe (frühester Länder-Eintrag) – Beginn ihrer eigenen Lernphase.
+    pub fn group_since(&self) -> rusqlite::Result<HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare("SELECT grp, MIN(first_ms) FROM countries GROUP BY grp")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect()
+    }
+
     pub fn add_country(&self, group: &str, cc: &str, ts: i64) -> rusqlite::Result<()> {
         self.conn.execute("INSERT OR IGNORE INTO countries (grp, cc, first_ms) VALUES (?1, ?2, ?3)", params![group, cc, ts])?;
         Ok(())
