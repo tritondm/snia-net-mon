@@ -716,24 +716,26 @@ fn build_summary(
     if syn > (packet_count as f64 * 0.02) as u64 && syn > 100 {
         threats.push((
             "medium",
-            format!(
+            model::trf!(
                 "Hoher SYN-Anteil: {} SYN / {} Pakete ({}%)",
+                "High SYN share: {} SYN / {} packets ({}%)",
                 syn,
                 packet_count,
                 syn * 100 / packet_count.max(1)
             ),
-            "Möglicher SYN-Scan oder SYN-Flood.".to_string(),
+            model::tr("Möglicher SYN-Scan oder SYN-Flood.", "Possible SYN scan or SYN flood.").to_string(),
         ));
     }
     if rst > (packet_count as f64 * 0.08) as u64 {
         threats.push((
             "medium",
-            format!(
+            model::trf!(
                 "Hoher RST-Anteil: {} RST-Pakete ({}%)",
+                "High RST share: {} RST packets ({}%)",
                 rst,
                 rst * 100 / packet_count.max(1)
             ),
-            "Viele abgelehnte Verbindungen – möglicher Port-Scan.".to_string(),
+            model::tr("Viele abgelehnte Verbindungen – möglicher Port-Scan.", "Many rejected connections – possible port scan.").to_string(),
         ));
     }
     {
@@ -744,8 +746,11 @@ fn build_summary(
                 threats.push((
                     "high",
                     format!("DNS NXDOMAIN x{}: {}", count, name),
-                    "Wiederholte nicht-auflösbare Domain – mögliche DNS-Tunneling oder DGA-Domain."
-                        .to_string(),
+                    model::tr(
+                        "Wiederholte nicht-auflösbare Domain – mögliche DNS-Tunneling oder DGA-Domain.",
+                        "Repeated unresolvable domain – possible DNS tunnelling or DGA domain.",
+                    )
+                    .to_string(),
                 ));
             }
         }
@@ -758,27 +763,38 @@ fn build_summary(
             .collect();
         scans.sort_by_key(|(_, n)| Reverse(*n));
         for (src, nports) in scans.into_iter().take(8) {
-            threats.push(("high", format!("Möglicher Port-Scan: {} -> {} Ziel-Ports", src, nports), format!("Quelle {} hat {} verschiedene Ziel-Ports kontaktiert – typisches Portscanner-Verhalten.", src, nports)));
+            threats.push((
+                "high",
+                model::trf!("Möglicher Port-Scan: {} -> {} Ziel-Ports", "Possible port scan: {} -> {} destination ports", src, nports),
+                model::trf!(
+                    "Quelle {} hat {} verschiedene Ziel-Ports kontaktiert – typisches Portscanner-Verhalten.",
+                    "Source {} contacted {} different destination ports – typical port scanner behaviour.",
+                    src,
+                    nports
+                ),
+            ));
         }
     }
     if dns_port_anomaly > 50 {
         threats.push((
             "high",
-            format!(
+            model::trf!(
                 "{} DNS-Meldungen auf Nicht-Standard-Ports",
+                "{} DNS messages on non-standard ports",
                 dns_port_anomaly
             ),
-            "DNS auf Ports != 53 – möglicher C2-Kanal.".to_string(),
+            model::tr("DNS auf Ports != 53 – möglicher C2-Kanal.", "DNS on ports != 53 – possible C2 channel.").to_string(),
         ));
     }
     if http_port_anomaly > 50 {
         threats.push((
             "medium",
-            format!(
+            model::trf!(
                 "{} HTTP-Meldungen auf Nicht-Standard-Ports",
+                "{} HTTP messages on non-standard ports",
                 http_port_anomaly
             ),
-            "HTTP auf Nicht-Standard-Ports – mögliche Tunneling/Reverse-Proxy.".to_string(),
+            model::tr("HTTP auf Nicht-Standard-Ports – mögliche Tunneling/Reverse-Proxy.", "HTTP on non-standard ports – possible tunnelling / reverse proxy.").to_string(),
         ));
     }
     let order = |sev: &str| match sev {

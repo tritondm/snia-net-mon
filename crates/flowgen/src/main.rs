@@ -28,7 +28,7 @@ fn parse_args() -> Result<Args> {
     while let Some(flag) = it.next() {
         let mut value = || it.next().with_context(|| format!("Wert für {flag} fehlt"));
         match flag.as_str() {
-            "--target" => args.target = value()?.parse().context("--target: Adresse:Port")?,
+            "--target" => args.target = resolve(&value()?)?,
             "--rate" => args.rate = value()?.parse().context("--rate: Flows pro Sekunde")?,
             "--exporters" => args.exporters = value()?.parse::<u32>().context("--exporters")?.clamp(1, 64),
             "--seconds" => args.seconds = value()?.parse().context("--seconds")?,
@@ -47,6 +47,15 @@ fn parse_args() -> Result<Args> {
         }
     }
     Ok(args)
+}
+
+/// Adresse:Port oder Hostname:Port (z. B. `snia-net-mon:2055` im Docker-Netz) auflösen. IPv4 bevorzugt – der
+/// Collector lauscht standardmäßig auf 0.0.0.0, "localhost" liefert aber oft zuerst ::1.
+fn resolve(target: &str) -> Result<SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<SocketAddr> =
+        target.to_socket_addrs().with_context(|| format!("--target {target}: erwartet Adresse:Port oder Hostname:Port"))?.collect();
+    addrs.iter().find(|a| a.is_ipv4()).or(addrs.first()).copied().with_context(|| format!("--target {target}: Name nicht auflösbar"))
 }
 
 #[tokio::main(flavor = "current_thread")]

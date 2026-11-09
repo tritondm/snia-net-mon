@@ -6,6 +6,7 @@ How to build and start Snia-Net-Mon and connect it to an exporter. What the indi
 [FEATURES.md](FEATURES.md), the overview is in the [README](README.md).
 
 - [Requirements](#requirements)
+- [Docker](#docker)
 - [Quick start (demo without exporter)](#quick-start-demo-without-exporter)
 - [GeoIP databases](#geoip-databases)
 - [Setting up flow export](#setting-up-flow-export)
@@ -21,6 +22,32 @@ How to build and start Snia-Net-Mon and connect it to an exporter. What the indi
 - An exporter that sends **NetFlow v9 or IPFIX** – for trying it out, the bundled generator `flowgen` is enough
 - Disk space: 48 h of raw data at 1,000 flows/s is about 30 GB, plus the history (up to 50 GB by default). In a small
   network it is a fraction of that.
+
+## Docker
+
+No Rust or Node needed – the image builds the frontend and backend itself:
+
+```bash
+docker compose up -d                        # web UI: http://127.0.0.1:8080, collector: UDP 2055
+docker compose --profile demo up -d         # additionally demo traffic from flowgen
+```
+
+Settings via environment variables (e.g. in a `.env` file next to `docker-compose.yml`):
+
+| Variable | Meaning |
+|---|---|
+| `SNIA_LANGUAGE` | Language of findings, error messages and mails: `en` or `de` (default `en` in Compose). The web UI switches itself (top right). |
+| `SNIA_API_TOKEN` | Access protection for the web UI – required before publishing port 8080 beyond localhost |
+| `MAXMIND_ACCOUNT_ID`, `MAXMIND_LICENSE_KEY` | GeoIP databases are downloaded and updated automatically |
+| `TZ` | Time zone for the anomaly detection, e.g. `Europe/Vienna` |
+| `SNIA_SMTP_PASSWORD` | SMTP password, if mail is configured |
+
+Data lives in the volume `snia-data` (`/data` in the container). For your own networks, alerts and mail, copy
+[`docker/config.toml`](docker/config.toml), add options from `config.example.toml` and mount it – the line is
+prepared in `docker-compose.yml`. Keep the paths under `/data` and `listen = "0.0.0.0:…"`.
+
+With Docker's port mapping, the exporter address seen by the collector is normally preserved. If flows arrive with
+the gateway address of the Docker network instead, use `network_mode: host` for the `snia-net-mon` service.
 
 ## Quick start (demo without exporter)
 

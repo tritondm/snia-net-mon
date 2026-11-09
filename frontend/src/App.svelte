@@ -10,6 +10,7 @@
   import { live } from './lib/live.svelte.js';
   import { api } from './lib/api.js';
   import { fmtBytes } from './lib/format.js';
+  import { t, locale } from './lib/i18n.svelte.js';
 
   let status = $state(null);
 
@@ -61,9 +62,9 @@
     {/if}
   </main>
   <footer class="px-4 pb-2 text-[10px] text-ctp-overlay0">
-    live {status?.retention_hours ?? 48} h · {#if status?.history}danach historie bis {fmtBytes(status.history.max_bytes)}, archive {status.history.archive_retention_days}
-      tage{:else}danach automatisch gelöscht{/if} · geoip {status?.geoip ?? '–'}{#if status?.geoip_built_ms}
-      · stand {new Date(status.geoip_built_ms).toLocaleDateString('de-AT')}{/if} (maxmind geolite2) · catppuccin mocha
+    live {status?.retention_hours ?? 48} h · {#if status?.history}{t('danach historie bis', 'then history up to')} {fmtBytes(status.history.max_bytes)}, {t('archive', 'archives')} {status.history.archive_retention_days}
+      {t('tage', 'days')}{:else}{t('danach automatisch gelöscht', 'then deleted automatically')}{/if} · geoip {status?.geoip ?? '–'}{#if status?.geoip_built_ms}
+      · {t('stand', 'as of')} {new Date(status.geoip_built_ms).toLocaleDateString(locale())}{/if} (maxmind geolite2) · catppuccin mocha
   </footer>
 </div>
 

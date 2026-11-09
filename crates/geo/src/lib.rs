@@ -155,7 +155,8 @@ impl GeoLookup {
             && let Ok(rec) = reader.lookup::<CountryRecord>(ip)
             && let Some(c) = rec.country.or(rec.registered_country)
         {
-            info.country = c.names.get("de").or_else(|| c.names.get("en")).cloned();
+            let lang = if model::is_english() { "en" } else { "de" };
+            info.country = c.names.get(lang).or_else(|| c.names.get("en")).cloned();
             info.cc = c.iso_code;
         }
         if let Some(Db { reader, .. }) = dbs.asn.as_deref()

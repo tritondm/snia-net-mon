@@ -1,4 +1,5 @@
 import { ui } from './state.svelte.js';
+import { t } from './i18n.svelte.js';
 
 const TOKEN_KEY = 'snm-api-token';
 
@@ -47,7 +48,7 @@ export async function api(path, { method = 'GET', query, body } = {}) {
   const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   if (res.status === 401) {
     ui.authRequired = true;
-    throw new Error('API-Token erforderlich');
+    throw new Error(t('API-Token erforderlich', 'API token required'));
   }
   if (!res.ok) {
     let message = res.statusText;

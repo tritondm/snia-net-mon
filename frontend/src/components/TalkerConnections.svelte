@@ -3,6 +3,7 @@
   // `talkers` kommt aus /stats/talkers (vollständige Summen), `connections` aus /stats/peers (stärkste IP-Paare je Dienst).
   import { fmtBytes, serviceName, isPrivate } from '../lib/format.js';
   import GeoTag from './GeoTag.svelte';
+  import { t } from '../lib/i18n.svelte.js';
 
   let { talkers = [], connections = [], onpick } = $props();
 
@@ -16,13 +17,13 @@
   }
 
   const groups = $derived.by(() => {
-    const max = Math.max(1, ...talkers.map((t) => t.bytes));
-    return talkers.map((t) => {
+    const max = Math.max(1, ...talkers.map((tk) => tk.bytes));
+    return talkers.map((tk) => {
       const peers = new Map();
       let count = 0;
       for (const c of connections) {
-        const sent = c.src_ip === t.ip;
-        if (!sent && c.dst_ip !== t.ip) continue;
+        const sent = c.src_ip === tk.ip;
+        if (!sent && c.dst_ip !== tk.ip) continue;
         count++;
         const peer = sent ? c.dst_ip : c.src_ip;
         const key = `${peer}|${service(c)}`;
@@ -35,8 +36,8 @@
       }
       const sorted = [...peers.values()].sort((a, b) => b.bytes - a.bytes);
       const top = sorted.slice(0, PEERS).map((p, i) => ({ ...p, color: PALETTE[i % PALETTE.length] }));
-      const rest = Math.max(0, t.bytes - top.reduce((sum, p) => sum + p.bytes, 0));
-      return { ...t, top, rest, more: sorted.length - top.length, count, scale: t.bytes / max };
+      const rest = Math.max(0, tk.bytes - top.reduce((sum, p) => sum + p.bytes, 0));
+      return { ...tk, top, rest, more: sorted.length - top.length, count, scale: tk.bytes / max };
     });
   });
 </script>
@@ -48,7 +49,7 @@
         <div class="flex items-baseline gap-2">
           <span class="text-ctp-overlay0 tabular-nums">#{rank + 1}</span>
           <button class="font-semibold hover:text-ctp-teal hover:underline {isPrivate(g.ip) ? 'text-ctp-sapphire' : 'text-ctp-text'}" onclick={() => onpick?.(g.ip)}>{g.ip}</button>
-          {#if isPrivate(g.ip)}<span class="chip !py-0 text-[10px]">intern</span>{/if}
+          {#if isPrivate(g.ip)}<span class="chip !py-0 text-[10px]">{t('intern', 'internal')}</span>{/if}
           <GeoTag geo={g.geo} org />
           <span class="ml-auto tabular-nums text-ctp-text">{fmtBytes(g.bytes)}</span>
           <span class="text-[11px] text-ctp-overlay0">{g.flows} flows</span>
@@ -61,7 +62,7 @@
               <div class="h-full" style="flex: {p.bytes} 0 0; background: {p.color}" title="{p.peer} · {p.service} · {fmtBytes(p.bytes)}"></div>
             {/each}
             {#if g.rest > 0}
-              <div class="h-full bg-ctp-overlay0/50" style="flex: {g.rest} 0 0" title="übrige: {fmtBytes(g.rest)}"></div>
+              <div class="h-full bg-ctp-overlay0/50" style="flex: {g.rest} 0 0" title="{t('übrige', 'other')}: {fmtBytes(g.rest)}"></div>
             {/if}
           </div>
         </div>
@@ -74,7 +75,7 @@
                 <button class="truncate hover:text-ctp-teal hover:underline {isPrivate(p.peer) ? 'text-ctp-sapphire' : 'text-ctp-subtext1'}" onclick={() => onpick?.(p.peer)}>{p.peer}</button>
                 <GeoTag geo={p.geo} org />
                 <span class="shrink-0 text-ctp-mauve">{p.service}</span>
-                <div class="ml-auto hidden h-1 w-24 shrink-0 overflow-hidden rounded-full bg-ctp-surface0 sm:block" title="↑ gesendet / ↓ empfangen aus Sicht von {g.ip}">
+                <div class="ml-auto hidden h-1 w-24 shrink-0 overflow-hidden rounded-full bg-ctp-surface0 sm:block" title={t(`↑ gesendet / ↓ empfangen aus Sicht von ${g.ip}`, `↑ sent / ↓ received from the view of ${g.ip}`)}>
                   <div class="flex h-full">
                     <div class="h-full bg-ctp-peach" style="width: {(p.sent / p.bytes) * 100}%"></div>
                     <div class="h-full bg-ctp-sapphire" style="width: {(p.received / p.bytes) * 100}%"></div>
@@ -89,7 +90,7 @@
           {/each}
           {#if g.more > 0 || g.rest > 0}
             <div class="text-[11px] text-ctp-overlay0">
-              {#if g.more > 0}+ {g.more} weitere gegenstellen{/if}{#if g.rest > 0} · übrige {fmtBytes(g.rest)}{/if}
+              {#if g.more > 0}+ {g.more} {t('weitere gegenstellen', 'more peers')}{/if}{#if g.rest > 0} · {t('übrige', 'other')} {fmtBytes(g.rest)}{/if}
             </div>
           {/if}
         </div>
@@ -97,5 +98,5 @@
     {/each}
   </div>
 {:else}
-  <div class="py-10 text-center text-ctp-overlay0">keine Daten – Filter setzen und suchen</div>
+  <div class="py-10 text-center text-ctp-overlay0">{t('keine Daten – Filter setzen und suchen', 'no data – set filters and search')}</div>
 {/if}

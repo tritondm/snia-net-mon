@@ -1,0 +1,30 @@
+# Snia-Net-Mon – Konfiguration im Container. Alle weiteren Optionen samt Erklärung: config.example.toml
+# Eigene Datei verwenden: in docker-compose.yml einbinden (./config.toml:/etc/snia-net-mon/config.toml:ro) und dabei
+# die Pfade unten (/data/…, /usr/share/snia-net-mon/frontend) und listen = "0.0.0.0:…" übernehmen.
+
+[server]
+# Im Container auf allen Adressen lauschen; nach außen begrenzt das Port-Mapping in docker-compose.yml.
+# Zugriffsschutz: Umgebungsvariable SNIA_API_TOKEN oder api_token hier.
+listen = "0.0.0.0:8080"
+frontend_dir = "/usr/share/snia-net-mon/frontend"
+
+[collector]
+listen = "0.0.0.0:2055"
+
+[storage]
+dir = "/data/live"
+
+[history]
+dir = "/data/history"
+archive_dir = "/data/archive"
+
+[anomaly]
+db = "/data/anomaly.db"
+
+[geoip]
+# Mit MAXMIND_ACCOUNT_ID und MAXMIND_LICENSE_KEY (Umgebungsvariablen) werden die Datenbanken automatisch geladen.
+country_db = "/data/GeoLite2-Country.mmdb"
+asn_db = "/data/GeoLite2-ASN.mmdb"
+
+[pcap]
+upload_dir = "/data/uploads"

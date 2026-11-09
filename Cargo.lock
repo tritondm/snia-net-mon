@@ -339,6 +339,7 @@ version = "0.1.0"
 dependencies = [
  "model",
  "rusqlite",
+ "rustix",
  "serde",
  "thiserror",
  "tokio",
@@ -621,6 +622,7 @@ name = "geo"
 version = "0.1.0"
 dependencies = [
  "maxminddb",
+ "model",
  "serde",
  "tracing",
 ]
@@ -1282,6 +1284,7 @@ version = "0.1.0"
 dependencies = [
  "geo",
  "indexmap",
+ "model",
  "serde",
  "serde_json",
  "tracing",

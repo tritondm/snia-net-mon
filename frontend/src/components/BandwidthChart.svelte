@@ -5,6 +5,7 @@
   import { live } from '../lib/live.svelte.js';
   import { ui } from '../lib/state.svelte.js';
   import { DIRECTIONS, fmtBits, fmtTime } from '../lib/format.js';
+  import { t } from '../lib/i18n.svelte.js';
 
   let width = $state(600);
   const height = 210;
@@ -113,7 +114,7 @@
     {height}
     class="block cursor-crosshair"
     role="img"
-    aria-label="Durchsatz Download/Upload – Bereich mit der Maus markieren"
+    aria-label={t('Durchsatz Download/Upload – Bereich mit der Maus markieren', 'Throughput download/upload – select a range with the mouse')}
     onpointermove={onMove}
     onpointerdown={onDown}
     onpointerup={onUp}
@@ -128,9 +129,9 @@
         <stop offset="0" stop-color={OUT} stop-opacity="0.5" /><stop offset="1" stop-color={OUT} stop-opacity="0.02" />
       </linearGradient>
     </defs>
-    {#each ticks as t}
-      <line x1={pad.l} x2={width - pad.r} y1={t.y} y2={t.y} stroke="#313244" stroke-dasharray="2 4" />
-      <text x={pad.l - 8} y={t.y + 4} text-anchor="end" class="fill-ctp-overlay0 text-[10px]">{t.label}</text>
+    {#each ticks as tk}
+      <line x1={pad.l} x2={width - pad.r} y1={tk.y} y2={tk.y} stroke="#313244" stroke-dasharray="2 4" />
+      <text x={pad.l - 8} y={tk.y + 4} text-anchor="end" class="fill-ctp-overlay0 text-[10px]">{tk.label}</text>
     {/each}
     <line x1={pad.l} x2={width - pad.r} y1={mid} y2={mid} stroke="#45475a" />
     <text x={pad.l + 6} y={mid - 6} class="text-[10px]" fill={IN}>↓ download</text>
@@ -144,7 +145,7 @@
       <text x={pad.l} y={height - 4} class="fill-ctp-overlay0 text-[10px]">{fmtTime(points[0].ts)}</text>
       <text x={width - pad.r} y={height - 4} text-anchor="end" class="fill-ctp-overlay0 text-[10px]">{fmtTime(points.at(-1).ts)}</text>
     {:else}
-      <text x={width / 2} y={mid - 8} text-anchor="middle" class="fill-ctp-overlay0 text-xs">warte auf Daten …</text>
+      <text x={width / 2} y={mid - 8} text-anchor="middle" class="fill-ctp-overlay0 text-xs">{t('warte auf Daten …', 'waiting for data …')}</text>
     {/if}
     {#if band}
       <rect x={band.x} y={pad.t} width={band.w} height={height - pad.t - pad.b} fill="#f9e2af" fill-opacity="0.12" stroke="#f9e2af" stroke-opacity="0.6" />
@@ -163,16 +164,16 @@
       <div class="text-ctp-overlay1">{fmtTime(hover.p.ts)}</div>
       <div style="color: {IN}">↓ download {fmtBits((hover.p.bytes_in ?? 0) * 8)}</div>
       <div style="color: {OUT}">↑ upload {fmtBits((hover.p.bytes_out ?? 0) * 8)}</div>
-      <div style="color: {INT}">⇄ intern {fmtBits(internal(hover.p) * 8)}</div>
-      <div class="text-ctp-overlay1">{hover.p.flows} flows · {hover.p.packets} pakete</div>
+      <div style="color: {INT}">⇄ {t('intern', 'internal')} {fmtBits(internal(hover.p) * 8)}</div>
+      <div class="text-ctp-overlay1">{hover.p.flows} flows · {hover.p.packets} {t('pakete', 'packets')}</div>
     </div>
   {/if}
   <div class="absolute right-2 top-0 flex items-center gap-3 text-[10px] text-ctp-overlay1">
     {#if ui.range}
-      <button class="chip !py-0 !border-ctp-yellow/60 text-ctp-yellow hover:bg-ctp-yellow/10" onclick={clearRange} title="Auswahl aufheben (Esc)">
+      <button class="chip !py-0 !border-ctp-yellow/60 text-ctp-yellow hover:bg-ctp-yellow/10" onclick={clearRange} title={t('Auswahl aufheben (Esc)', 'Clear selection (Esc)')}>
         ❚❚ {fmtTime(ui.range.from)} – {fmtTime(ui.range.to)} · ▶ live
       </button>
     {/if}
-    <span style="color: {IN}">━ download</span><span style="color: {OUT}">━ upload</span><span style="color: {INT}">┅ intern</span>
+    <span style="color: {IN}">━ download</span><span style="color: {OUT}">━ upload</span><span style="color: {INT}">┅ {t('intern', 'internal')}</span>
   </div>
 </div>

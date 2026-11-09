@@ -6,11 +6,11 @@ use crate::beacon::{self, Finding, Tracker};
 use crate::drift;
 use crate::exceptions::{ExceptionInput, ExceptionRow, Exceptions, Subject};
 use crate::baseline::Profile;
-use crate::features::{FEATURES, HostWindow, NAMES, PolicyHit, Window, is_bytes};
+use crate::features::{FEATURES, HostWindow, NAMES, PolicyHit, Window, is_bytes, label};
 use crate::forest::{self, Forest, Rng, SHARE, TIME, Vector};
 use crate::store::{Bucket, Counts, Event, EventFilter, EventRow, Kind, Severity, Store};
 use jiff::tz::TimeZone;
-use model::{cidr_range, ip_from_bytes, ip_to_bytes};
+use model::{cidr_range, ip_from_bytes, ip_to_bytes, trf};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -441,15 +441,15 @@ impl Engine {
     /// Ausnahme anlegen (`id = None`) oder ändern; wirkt sofort auch auf bereits gespeicherte Meldungen.
     pub fn save_exception(&mut self, id: Option<i64>, input: &ExceptionInput, now: i64) -> Result<ExceptionRow, crate::Error> {
         let x = crate::exceptions::normalize(input).map_err(crate::Error::Invalid)?;
-        let id = self.store.save_exception(id, &x, now)?.ok_or_else(|| crate::Error::NotFound("Ausnahme gibt es nicht (mehr)".into()))?;
+        let id = self.store.save_exception(id, &x, now)?.ok_or_else(|| crate::Error::NotFound(model::tr("Ausnahme gibt es nicht (mehr)", "exception does not exist (any more)").into()))?;
         self.reassign(now)?;
         let row = self.store.exceptions()?.into_iter().find(|r| r.id == id);
-        row.ok_or_else(|| crate::Error::NotFound("Ausnahme gibt es nicht (mehr)".into()))
+        row.ok_or_else(|| crate::Error::NotFound(model::tr("Ausnahme gibt es nicht (mehr)", "exception does not exist (any more)").into()))
     }
 
     pub fn delete_exception(&mut self, id: i64, now: i64) -> Result<(), crate::Error> {
         if !self.store.delete_exception(id)? {
-            return Err(crate::Error::NotFound("Ausnahme gibt es nicht (mehr)".into()));
+            return Err(crate::Error::NotFound(model::tr("Ausnahme gibt es nicht (mehr)", "exception does not exist (any more)").into()));
         }
         self.reassign(now)?;
         Ok(())
@@ -512,10 +512,11 @@ struct Hit {
 fn stat_event(ts: i64, host: &str, group: &str, mut hits: Vec<Hit>, slot: Option<SlotKind>, ml: Option<(f64, f64)>, cfg: &AnomalyConfig) -> Event {
     hits.sort_by(|a, b| b.z.total_cmp(&a.z));
     let top = &hits[0];
-    let more = if hits.len() > 1 { format!(" · +{} weitere", hits.len() - 1) } else { String::new() };
-    let title = format!(
+    let more = if hits.len() > 1 { trf!(" · +{} weitere", " · +{} more", hits.len() - 1) } else { String::new() };
+    let title = trf!(
         "{} {} statt typisch {} ({}×){more}",
-        NAMES[top.feature],
+        "{} {} instead of typically {} ({}×){more}",
+        label(NAMES[top.feature]),
         fmt_value(top.feature, top.value),
         fmt_value(top.feature, top.typical),
         fmt_factor((top.value + 1.0) / (top.typical + 1.0))
@@ -533,7 +534,7 @@ fn stat_event(ts: i64, host: &str, group: &str, mut hits: Vec<Hit>, slot: Option
         title,
         detail: json!({
             "features": hits.iter().map(|h| json!({
-                "name": NAMES[h.feature], "value": h.value, "typical": h.typical, "z": round2(h.z), "bytes": is_bytes(h.feature),
+                "name": label(NAMES[h.feature]), "value": h.value, "typical": h.typical, "z": round2(h.z), "bytes": is_bytes(h.feature),
             })).collect::<Vec<_>>(),
             "slot": slot.map(SlotKind::name),
             "ml_score": ml.map(|(score, _)| round2(score)),
@@ -562,8 +563,12 @@ fn ml_event(ts: i64, host: &str, group: &str, score: f64, v: &Vector, log: &[f64
         let f = NAMES.iter().position(|n| *n == name)?;
         own.map(|(_, p)| (p[f].mean.exp_m1().max(0.0), round2(p[f].z(log[f]))))
     };
-    let names: Vec<&str> = deviations.iter().map(|d| d.0).collect();
-    let reason = if names.is_empty() { "kombination aus uhrzeit und werten".to_string() } else { format!("auffällig: {}", names.join(", ")) };
+    let names: Vec<&str> = deviations.iter().map(|d| label(d.0)).collect();
+    let reason = if names.is_empty() {
+        model::tr("kombination aus uhrzeit und werten", "combination of time of day and values").to_string()
+    } else {
+        trf!("auffällig: {}", "unusual: {}", names.join(", "))
+    };
     Some(Event {
         ts,
         host: host.into(),
@@ -572,13 +577,13 @@ fn ml_event(ts: i64, host: &str, group: &str, score: f64, v: &Vector, log: &[f64
         tag: String::new(),
         severity: Severity::Info,
         score,
-        title: format!("ungewöhnliches gesamtmuster (ml-score {score:.2}) – {reason}"),
+        title: trf!("ungewöhnliches gesamtmuster (ml-score {score:.2}) – {reason}", "unusual overall pattern (ml score {score:.2}) – {reason}"),
         detail: json!({
             "ml_score": round2(score),
             "deviations": deviations.iter().map(|(name, value, typical, kind)| {
                 let own = own_typical(name);
                 json!({
-                    "name": name, "value": value, "typical": typical, "bytes": *kind == "bytes", "percent": *kind == "percent",
+                    "name": label(name), "value": value, "typical": typical, "bytes": *kind == "bytes", "percent": *kind == "percent",
                     "own_typical": own.map(|o| o.0), "own_z": own.map(|o| o.1),
                 })
             }).collect::<Vec<_>>(),
@@ -643,7 +648,7 @@ fn country_event(ts: i64, host: &str, group: &str, cc: &str, bytes: u64, h: &Hos
     // selbst geöffnete Verbindungen zuerst, dann nach Volumen
     peers.sort_by(|a, b| a.1.served.cmp(&b.1.served).then(b.1.bytes.cmp(&a.1.bytes)).then(a.0.cmp(b.0)));
     let target = match peers.first() {
-        Some((ip, p)) if peers.len() > 1 => format!(": {} · +{} weitere ziele", fmt_peer(ip, p.port), peers.len() - 1),
+        Some((ip, p)) if peers.len() > 1 => trf!(": {} · +{} weitere ziele", ": {} · +{} more destinations", fmt_peer(ip, p.port), peers.len() - 1),
         Some((ip, p)) => format!(": {}", fmt_peer(ip, p.port)),
         None => String::new(),
     };
@@ -655,7 +660,11 @@ fn country_event(ts: i64, host: &str, group: &str, cc: &str, bytes: u64, h: &Hos
         tag: cc.into(),
         severity: Severity::Info,
         score: bytes as f64,
-        title: format!("erste verbindung der gruppe {group} nach {cc}{target} ({} hochgeladen)", fmt_bytes(bytes as f64)),
+        title: trf!(
+            "erste verbindung der gruppe {group} nach {cc}{target} ({} hochgeladen)",
+            "first connection of group {group} to {cc}{target} ({} uploaded)",
+            fmt_bytes(bytes as f64)
+        ),
         detail: json!({
             "cc": cc,
             "bytes": bytes,
@@ -686,7 +695,12 @@ fn scan_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
         tag: String::new(),
         severity: Severity::High,
         score: attempts as f64,
-        title: format!("portscan: {attempts} fehlgeschlagene verbindungsversuche zu {} hosts auf {} ports", hosts.len(), ports.len()),
+        title: trf!(
+            "portscan: {attempts} fehlgeschlagene verbindungsversuche zu {} hosts auf {} ports",
+            "port scan: {attempts} failed connection attempts to {} hosts on {} ports",
+            hosts.len(),
+            ports.len()
+        ),
         detail: json!({
             "attempts": attempts,
             "hosts": hosts.len(),
@@ -700,7 +714,7 @@ fn scan_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
 fn dns_event(ts: i64, host: &str, group: &str, mut resolvers: Vec<(IpAddr, u64)>) -> Event {
     resolvers.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let total: u64 = resolvers.iter().map(|r| r.1).sum();
-    let more = if resolvers.len() > 1 { format!(" · +{} weitere", resolvers.len() - 1) } else { String::new() };
+    let more = if resolvers.len() > 1 { trf!(" · +{} weitere", " · +{} more", resolvers.len() - 1) } else { String::new() };
     Event {
         ts,
         host: host.into(),
@@ -709,7 +723,7 @@ fn dns_event(ts: i64, host: &str, group: &str, mut resolvers: Vec<(IpAddr, u64)>
         tag: String::new(),
         severity: Severity::Warn,
         score: total as f64,
-        title: format!("dns an externen resolver {} ({} flows){more}", resolvers[0].0, resolvers[0].1),
+        title: trf!("dns an externen resolver {} ({} flows){more}", "dns to external resolver {} ({} flows){more}", resolvers[0].0, resolvers[0].1),
         detail: json!({
             "resolvers": resolvers.iter().take(20).map(|(ip, n)| json!({ "ip": ip.to_string(), "flows": n })).collect::<Vec<_>>(),
             "flows": total,
@@ -727,7 +741,7 @@ fn policy_event(ts: i64, host: &str, group: &str, rule: &crate::policy::Rule, hi
         1..=5 => format!(", ports {}", ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")),
         n => format!(", {n} ports"),
     };
-    let peer_text = if peers.len() == 1 { peers[0].clone() } else { format!("{} zielen", peers.len()) };
+    let peer_text = if peers.len() == 1 { peers[0].clone() } else { trf!("{} zielen", "{} destinations", peers.len()) };
     Event {
         ts,
         host: host.into(),
@@ -736,7 +750,7 @@ fn policy_event(ts: i64, host: &str, group: &str, rule: &crate::policy::Rule, hi
         tag: rule.name.clone(),
         severity: rule.severity,
         score: hit.flows as f64,
-        title: format!("netz-regel {}: {} verbindungen zu {peer_text}{port_text}", rule.name, hit.flows),
+        title: trf!("netz-regel {}: {} verbindungen zu {peer_text}{port_text}", "network rule {}: {} connections to {peer_text}{port_text}", rule.name, hit.flows),
         detail: json!({
             "rule": rule.name,
             "from": rule.from,
@@ -770,8 +784,9 @@ fn beacon_event(ts: i64, group: &str, f: &Finding, info: &beacon::PeerInfo) -> E
         // nur ein Hinweis zum Nachsehen: regelmäßige Verbindungen haben oft harmlose Gründe (geht nie per Mail raus)
         severity: Severity::Info,
         score: f.connections as f64,
-        title: format!(
+        title: trf!(
             "beaconing zu {peer}:{port}{place}: {} verbindungen, alle {} ± {:.0} %, je ~{}, seit {span}",
+            "beaconing to {peer}:{port}{place}: {} connections, every {} ± {:.0} %, ~{} each, for {span}",
             f.connections,
             fmt_interval(f.interval_s),
             f.jitter * 100.0,
@@ -798,9 +813,10 @@ fn beacon_event(ts: i64, group: &str, f: &Finding, info: &beacon::PeerInfo) -> E
 /// Schleichender Anstieg: Der Upload liegt seit `state.windows` Fenstern leicht über dem Typischen.
 fn drift_event(ts: i64, host: &str, group: &str, state: &drift::State, slot: SlotKind, cfg: &drift::DriftConfig, window_ms: i64) -> Event {
     let f = drift::FEATURE;
-    let title = format!(
+    let title = trf!(
         "{} seit {} erhöht: {} statt typisch {} ({}×)",
-        NAMES[f],
+        "{} raised for {}: {} instead of typically {} ({}×)",
+        label(NAMES[f]),
         fmt_duration(state.windows as i64 * window_ms),
         fmt_value(f, state.value),
         fmt_value(f, state.typical),
@@ -816,7 +832,7 @@ fn drift_event(ts: i64, host: &str, group: &str, state: &drift::State, slot: Slo
         score: state.sum,
         title,
         detail: json!({
-            "name": NAMES[f],
+            "name": label(NAMES[f]),
             "since_ms": state.since_ms,
             "windows": state.windows,
             "value": state.value,

@@ -2,6 +2,7 @@
   // Verteilung des Verkehrs nach Richtung im Zeitfenster: ein gestapelter Balken + Werte je Richtung.
   import { DIRECTIONS, fmtBytes, fmtBits } from '../lib/format.js';
   import { ui } from '../lib/state.svelte.js';
+  import { t } from '../lib/i18n.svelte.js';
   let { stats = [] } = $props();
 
   const total = $derived(stats.reduce((s, d) => s + d.bytes, 0));
@@ -21,7 +22,7 @@
       {@const meta = DIRECTIONS[d.direction]}
       <button
         class="rounded-lg border px-3 py-2 text-left transition {ui.dir === d.direction ? 'border-ctp-mauve/60 bg-ctp-surface0/60' : 'border-ctp-surface0 hover:border-ctp-surface2'}"
-        title="{meta.title} – klicken filtert das Dashboard"
+        title="{meta.title} – {t('klicken filtert das Dashboard', 'click to filter the dashboard')}"
         onclick={() => (ui.dir = ui.dir === d.direction ? '' : d.direction)}
       >
         <div class="flex items-center gap-1.5 text-[11px] uppercase tracking-wider" style="color: {meta.color}">

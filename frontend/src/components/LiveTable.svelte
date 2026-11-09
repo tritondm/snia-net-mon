@@ -7,6 +7,7 @@
   import { fmtBytes, fmtBits, fmtAgo, fmtTime, serviceName, isPrivate, protoColor, DIRECTIONS } from '../lib/format.js';
   import DirectionFilter from './DirectionFilter.svelte';
   import GeoTag from './GeoTag.svelte';
+  import { t } from '../lib/i18n.svelte.js';
 
   let filter = $state('');
   let dir = $state('');
@@ -63,26 +64,26 @@
 
 <div class="flex h-full flex-col">
   <div class="flex items-center gap-2 border-b border-ctp-surface0/60 px-3 py-2">
-    <input class="input !py-1" placeholder="filtern: ip, port, proto, dienst, land, netz …" bind:value={filter} />
+    <input class="input !py-1" placeholder={t('filtern: ip, port, proto, dienst, land, netz …', 'filter: ip, port, proto, service, country, network …')} bind:value={filter} />
     <DirectionFilter bind:value={dir} compact />
-    <button class="btn !py-1 {paused || ui.range ? '!border-ctp-yellow/60 !text-ctp-yellow' : ''}" onclick={togglePause} title={ui.range ? 'Zeitbereich aufheben, zurück zu live' : 'Tabelle einfrieren'}>
+    <button class="btn !py-1 {paused || ui.range ? '!border-ctp-yellow/60 !text-ctp-yellow' : ''}" onclick={togglePause} title={ui.range ? t('Zeitbereich aufheben, zurück zu live', 'Clear time range, back to live') : t('Tabelle einfrieren', 'Freeze table')}>
       {paused || ui.range ? '▶ live' : '❚❚ pause'}
     </button>
     <span class="chip shrink-0">{rows.length} / {ui.range ? source.length : live.active}</span>
   </div>
   {#if ui.range}
     <div class="flex items-center gap-2 border-b border-ctp-yellow/30 bg-ctp-yellow/5 px-3 py-1 text-[11px] text-ctp-yellow">
-      <span>❚❚ zeitbereich {fmtTime(ui.range.from)} – {fmtTime(ui.range.to)} ({Math.round((ui.range.to - ui.range.from) / 1000)} s)</span>
-      <span class="text-ctp-overlay0">· rate = ø über den bereich · nach bytes sortiert</span>
-      {#if rangeLoading}<span class="text-ctp-overlay1">lädt …</span>{/if}
+      <span>❚❚ {t('zeitbereich', 'time range')} {fmtTime(ui.range.from)} – {fmtTime(ui.range.to)} ({Math.round((ui.range.to - ui.range.from) / 1000)} s)</span>
+      <span class="text-ctp-overlay0">· {t('rate = ø über den bereich · nach bytes sortiert', 'rate = average over the range · sorted by bytes')}</span>
+      {#if rangeLoading}<span class="text-ctp-overlay1">{t('lädt …', 'loading …')}</span>{/if}
       {#if rangeError}<span class="text-ctp-red">{rangeError}</span>{/if}
-      <button class="ml-auto hover:text-ctp-text" onclick={() => (ui.range = null)} title="Auswahl aufheben">✕</button>
+      <button class="ml-auto hover:text-ctp-text" onclick={() => (ui.range = null)} title={t('Auswahl aufheben', 'Clear selection')}>✕</button>
     </div>
   {/if}
   <div class="min-h-0 flex-1 overflow-auto">
     <table class="table-flows">
       <thead>
-        <tr><th title="Richtung">Ri.</th><th>Proto</th><th>Quelle</th><th></th><th>Ziel</th><th title="Organisation der externen Gegenstelle (GeoIP/ASN)">Netz</th><th>Dienst</th><th class="text-right">{ui.range ? 'ø Rate' : 'Rate'}</th><th class="text-right">Gesamt</th><th class="text-right">{ui.range ? 'Dauer' : 'Alter'}</th></tr>
+        <tr><th title={t('Richtung', 'Direction')}>{t('Ri.', 'Dir')}</th><th>Proto</th><th>{t('Quelle', 'Source')}</th><th></th><th>{t('Ziel', 'Destination')}</th><th title={t('Organisation der externen Gegenstelle (GeoIP/ASN)', 'Organisation of the external peer (GeoIP/ASN)')}>{t('Netz', 'Network')}</th><th>{t('Dienst', 'Service')}</th><th class="text-right">{ui.range ? t('ø Rate', 'Avg rate') : 'Rate'}</th><th class="text-right">{t('Gesamt', 'Total')}</th><th class="text-right">{ui.range ? t('Dauer', 'Duration') : t('Alter', 'Age')}</th></tr>
       </thead>
       <tbody>
         {#each rows as c (c.src_ip + c.src_port + c.dst_ip + c.dst_port + c.proto)}
@@ -113,7 +114,7 @@
           </tr>
         {:else}
           <tr><td colspan="10" class="py-10 text-center text-ctp-overlay0">
-            {#if ui.range}{rangeLoading ? 'lädt …' : 'keine Verbindungen in diesem Zeitbereich'}{:else}keine aktiven Verbindungen – kommt NetFlow/IPFIX an Port 2055 an?{/if}
+            {#if ui.range}{rangeLoading ? t('lädt …', 'loading …') : t('keine Verbindungen in diesem Zeitbereich', 'no connections in this time range')}{:else}{t('keine aktiven Verbindungen – kommt NetFlow/IPFIX an Port 2055 an?', 'no active connections – is NetFlow/IPFIX arriving on port 2055?')}{/if}
           </td></tr>
         {/each}
       </tbody>

@@ -6,8 +6,12 @@
 # Web-UI und API. Nur lokal erreichbar; für den Zugriff aus dem Netz z. B. "0.0.0.0:8080" UND api_token setzen.
 listen = "127.0.0.1:8080"
 frontend_dir = "frontend/dist"
-# Optionaler Zugriffsschutz: ist ein Token gesetzt, fragt die Web-UI einmalig danach.
+# Optionaler Zugriffsschutz: ist ein Token gesetzt, fragt die Web-UI einmalig danach. Alternativ: SNIA_API_TOKEN.
 api_token = ""
+# Sprache der Texte, die der Server erzeugt – Befunde der Anomalie-Erkennung und PCAP-Analyse, Fehlermeldungen, Mails,
+# Ländernamen: "de" oder "en". Alternativ: SNIA_LANGUAGE. Die Web-UI wählt ihre Sprache selbst (Browsersprache,
+# Umschalter de/en oben rechts). Log-Meldungen bleiben deutsch.
+language = "de"
 
 [network]
 # Interne Netze – daraus ergibt sich die Richtung jedes Flows:

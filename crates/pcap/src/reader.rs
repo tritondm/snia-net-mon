@@ -88,22 +88,22 @@ impl<R: Read> CaptureReader<R> {
         let mut magic = [0u8; 4];
         reader
             .read_exact(&mut magic)
-            .map_err(|_| "Datei zu kurz – keine Capture-Datei".to_string())?;
+            .map_err(|_| model::tr("Datei zu kurz – keine Capture-Datei", "file too short – not a capture file").to_string())?;
         let format = match u32::from_le_bytes(magic) {
             0x0a0d0d0a => {
                 // pcapng: Section Header Block – die Byte-Reihenfolge steht im Byte-Order-Magic danach
                 let mut rest = [0u8; 8];
                 reader
                     .read_exact(&mut rest)
-                    .map_err(|_| "pcapng-Kopf unvollständig".to_string())?;
+                    .map_err(|_| model::tr("pcapng-Kopf unvollständig", "pcapng header incomplete").to_string())?;
                 let swapped = match u32::from_le_bytes(rest[4..8].try_into().unwrap()) {
                     0x1a2b3c4d => false,
                     0x4d3c2b1a => true,
-                    _ => return Err("pcapng: ungültiges Byte-Order-Magic".into()),
+                    _ => return Err(model::tr("pcapng: ungültiges Byte-Order-Magic", "pcapng: invalid byte-order magic").into()),
                 };
                 let total = read_u32(&rest[0..4], swapped) as usize;
                 if !(28..=MAX_BLOCK).contains(&total) || !total.is_multiple_of(4) {
-                    return Err("pcapng: ungültige Blocklänge im Section Header".into());
+                    return Err(model::tr("pcapng: ungültige Blocklänge im Section Header", "pcapng: invalid block length in section header").into());
                 }
                 skip(&mut reader, total - 12)?;
                 Format::Pcapng {
@@ -117,18 +117,18 @@ impl<R: Read> CaptureReader<R> {
                 let mut hdr = [0u8; 20];
                 reader
                     .read_exact(&mut hdr)
-                    .map_err(|_| "PCAP-Kopf unvollständig".to_string())?;
+                    .map_err(|_| model::tr("PCAP-Kopf unvollständig", "PCAP header incomplete").to_string())?;
                 // Obere 16 Bit des Linktype-Felds können FCS-Informationen tragen
                 let dlt = read_u32(&hdr[16..20], swapped) & 0xffff;
                 let linktype = LinkType::from_dlt(dlt)
-                    .ok_or_else(|| format!("nicht unterstützter Linktype {dlt}"))?;
+                    .ok_or_else(|| model::trf!("nicht unterstützter Linktype {dlt}", "unsupported link type {dlt}"))?;
                 Format::Pcap {
                     swapped,
                     nanos,
                     linktype: Some(linktype),
                 }
             }
-            m => return Err(format!("keine PCAP/pcapng-Datei (Magic {m:#010x})")),
+            m => return Err(model::trf!("keine PCAP/pcapng-Datei (Magic {m:#010x})", "not a PCAP/pcapng file (magic {m:#010x})")),
         };
         Ok(Self {
             reader,
@@ -186,7 +186,7 @@ impl<R: Read> CaptureReader<R> {
         let frac = read_u32(&rec[4..8], swapped) as f64;
         let incl = read_u32(&rec[8..12], swapped) as usize;
         if incl > MAX_BLOCK {
-            return Some(Err(format!("Paketlänge {incl} unplausibel – Datei defekt")));
+            return Some(Err(model::trf!("Paketlänge {incl} unplausibel – Datei defekt", "implausible packet length {incl} – file corrupt")));
         }
         self.buf.resize(incl, 0);
         if !read_or_eof(&mut self.reader, &mut self.buf)? {
@@ -212,8 +212,9 @@ impl<R: Read> CaptureReader<R> {
                 return Some(self.new_section(total));
             }
             if !(12..=MAX_BLOCK).contains(&total) {
-                return Some(Err(format!(
-                    "pcapng: Blocklänge {total} unplausibel – Datei defekt"
+                return Some(Err(model::trf!(
+                    "pcapng: Blocklänge {total} unplausibel – Datei defekt",
+                    "pcapng: implausible block length {total} – file corrupt"
                 )));
             }
             // Blockinhalt + abschließende Längenangabe
@@ -285,11 +286,11 @@ impl<R: Read> CaptureReader<R> {
         let mut bom = [0u8; 4];
         self.reader
             .read_exact(&mut bom)
-            .map_err(|_| "pcapng: Section Header unvollständig".to_string())?;
+            .map_err(|_| model::tr("pcapng: Section Header unvollständig", "pcapng: section header incomplete").to_string())?;
         let swapped = match u32::from_le_bytes(bom) {
             0x1a2b3c4d => false,
             0x4d3c2b1a => true,
-            _ => return Err("pcapng: ungültiges Byte-Order-Magic".into()),
+            _ => return Err(model::tr("pcapng: ungültiges Byte-Order-Magic", "pcapng: invalid byte-order magic").into()),
         };
         // Die Länge wurde vor dem Byte-Order-Magic mit der alten Reihenfolge gelesen
         let total = if swapped == matches!(self.format, Format::Pcapng { swapped: true, .. }) {
@@ -298,7 +299,7 @@ impl<R: Read> CaptureReader<R> {
             (raw_total as u32).swap_bytes() as usize
         };
         if !(28..=MAX_BLOCK).contains(&total) {
-            return Err("pcapng: ungültige Blocklänge im Section Header".into());
+            return Err(model::tr("pcapng: ungültige Blocklänge im Section Header", "pcapng: invalid block length in section header").into());
         }
         skip(&mut self.reader, total - 12)?;
         self.format = Format::Pcapng {
@@ -307,7 +308,7 @@ impl<R: Read> CaptureReader<R> {
         };
         match self.next_pcapng() {
             Some(result) => result,
-            None => Err("pcapng: Section ohne Pakete am Dateiende".into()),
+            None => Err(model::tr("pcapng: Section ohne Pakete am Dateiende", "pcapng: section without packets at end of file").into()),
         }
     }
 }
@@ -369,7 +370,7 @@ fn skip<R: Read>(reader: &mut R, n: usize) -> Result<(), String> {
     if copied as usize == n {
         Ok(())
     } else {
-        Err("Datei endet mitten im Kopf".into())
+        Err(model::tr("Datei endet mitten im Kopf", "file ends in the middle of a header").into())
     }
 }
 

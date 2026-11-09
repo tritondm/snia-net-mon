@@ -102,7 +102,7 @@ impl From<anomaly::Error> for ApiError {
             anomaly::Error::NotFound(msg) => ApiError(StatusCode::NOT_FOUND, msg),
             other => {
                 tracing::error!(err = %other, "Fehler der Anomalie-Erkennung");
-                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Fehler der Anomalie-Erkennung".into())
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, model::tr("Fehler der Anomalie-Erkennung", "anomaly detection error").into())
             }
         }
     }
@@ -115,7 +115,7 @@ impl From<DbError> for ApiError {
             DbError::Unavailable(msg) => ApiError(StatusCode::CONFLICT, msg),
             other => {
                 tracing::error!(err = %other, "Datenbankfehler");
-                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Datenbankfehler".into())
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, model::tr("Datenbankfehler", "database error").into())
             }
         }
     }
@@ -142,7 +142,7 @@ async fn require_token(State(state): State<AppState>, request: Request, next: Ne
     if ok {
         next.run(request).await
     } else {
-        ApiError(StatusCode::UNAUTHORIZED, "API-Token fehlt oder ist falsch".into()).into_response()
+        ApiError(StatusCode::UNAUTHORIZED, model::tr("API-Token fehlt oder ist falsch", "API token missing or wrong").into()).into_response()
     }
 }
 
@@ -167,11 +167,11 @@ impl AppState {
         if source.is_empty() || source == "live" {
             return Ok(self.db.clone());
         }
-        let history = self.history.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Historie ist abgeschaltet ([history] enabled = false)".into()))?;
+        let history = self.history.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, model::tr("Historie ist abgeschaltet ([history] enabled = false)", "history is disabled ([history] enabled = false)").into()))?;
         Ok(match source.strip_prefix("archive:") {
             Some(name) => history.archive(name)?,
             None if source == "history" => history.current()?,
-            None => return Err(ApiError(StatusCode::BAD_REQUEST, format!("source: erlaubt sind live, history, archive:<name> – nicht {source}"))),
+            None => return Err(ApiError(StatusCode::BAD_REQUEST, model::trf!("source: erlaubt sind live, history, archive:<name> – nicht {source}", "source: allowed are live, history, archive:<name> – not {source}"))),
         })
     }
 }
@@ -180,7 +180,7 @@ impl AppState {
 
 impl AppState {
     fn anomaly(&self) -> Result<&anomaly::Anomaly, ApiError> {
-        self.anomaly.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Anomalie-Erkennung ist abgeschaltet ([anomaly] enabled = false)".into()))
+        self.anomaly.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, model::tr("Anomalie-Erkennung ist abgeschaltet ([anomaly] enabled = false)", "anomaly detection is disabled ([anomaly] enabled = false)").into()))
     }
 }
 
@@ -290,7 +290,7 @@ struct ArchiveState {
 
 /// Archiv zum Ansehen entpacken. Antwortet sofort mit `unpacking` oder `ready`; Fortschritt über `GET /archives`.
 async fn open_archive(State(s): State<AppState>, Path(name): Path<String>) -> ApiResult<ArchiveState> {
-    let history = s.history.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Historie ist abgeschaltet".into()))?;
+    let history = s.history.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, model::tr("Historie ist abgeschaltet", "history is disabled").into()))?;
     Ok(Json(ArchiveState { state: history.open_archive(&name)? }))
 }
 

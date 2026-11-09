@@ -1,5 +1,6 @@
 <script>
   import { fmtBytes, protoColor } from '../lib/format.js';
+  import { t } from '../lib/i18n.svelte.js';
   let { protocols = [] } = $props();
 
   const total = $derived(protocols.reduce((s, p) => s + p.bytes, 0));
@@ -31,7 +32,7 @@
           onmouseenter={() => (hovered = a.proto)} onmouseleave={() => (hovered = null)} />
       {/if}
     {/each}
-    <text x="70" y="67" text-anchor="middle" class="fill-ctp-overlay1 text-[9px] uppercase tracking-widest">gesamt</text>
+    <text x="70" y="67" text-anchor="middle" class="fill-ctp-overlay1 text-[9px] uppercase tracking-widest">{t('gesamt', 'total')}</text>
     <text x="70" y="82" text-anchor="middle" class="fill-ctp-text text-[12px] font-semibold">{fmtBytes(total)}</text>
   </svg>
   <ul class="min-w-0 flex-1 space-y-1">
@@ -44,7 +45,7 @@
         <span class="ml-auto tabular-nums text-ctp-subtext1">{(a.share * 100).toFixed(1)}%</span>
       </li>
     {:else}
-      <li class="text-ctp-overlay0">keine Daten</li>
+      <li class="text-ctp-overlay0">{t('keine Daten', 'no data')}</li>
     {/each}
   </ul>
 </div>

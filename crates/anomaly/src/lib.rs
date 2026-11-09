@@ -276,15 +276,16 @@ pub fn spawn(
 }
 
 fn kind_label(kind: Kind) -> &'static str {
+    use model::tr;
     match kind {
-        Kind::Stat => "statistik",
+        Kind::Stat => tr("statistik", "statistics"),
         Kind::Ml => "ml",
         Kind::Scan => "portscan",
-        Kind::Dns => "externes dns",
-        Kind::Country => "neues land",
-        Kind::Policy => "netz-regel",
+        Kind::Dns => tr("externes dns", "external dns"),
+        Kind::Country => tr("neues land", "new country"),
+        Kind::Policy => tr("netz-regel", "network rule"),
         Kind::Beacon => "beaconing",
-        Kind::Drift => "schleichend",
+        Kind::Drift => tr("schleichend", "creeping"),
     }
 }
 
@@ -332,8 +333,8 @@ fn wants_mail(e: &Event, config: &AnomalyConfig) -> bool {
 
 /// Betreff und Text der Mail zu einer Auffälligkeit.
 pub fn render(e: &Event) -> (String, String) {
-    let subject = format!("[snia-net-mon] {} bei {}: {}", kind_label(e.kind), e.host, e.title);
-    let body = format!(
+    let subject = model::trf!("[snia-net-mon] {} bei {}: {}", "[snia-net-mon] {} on {}: {}", kind_label(e.kind), e.host, e.title);
+    let body = model::trf!(
         "Snia-Net-Mon hat eine Auffälligkeit erkannt.\n\
          \n\
          Art:      {kind} ({severity})\n\
@@ -346,6 +347,18 @@ pub fn render(e: &Event) -> (String, String) {
          \n\
          Wiederholungen derselben Auffälligkeit werden nicht erneut gemeldet.\n\
          Alles Weitere in der Web-UI unter anomalien (Alt+5).\n",
+        "Snia-Net-Mon detected an anomaly.\n\
+         \n\
+         Kind:     {kind} ({severity})\n\
+         Host:     {host}\n\
+         Group:    {group}\n\
+         Window:   until {ts}\n\
+         Finding:  {title}\n\
+         \n\
+         Details:\n{detail}\n\
+         \n\
+         Repeats of the same anomaly are not reported again.\n\
+         Everything else in the web UI under anomalies (Alt+5).\n",
         kind = kind_label(e.kind),
         severity = e.severity.name(),
         host = e.host,

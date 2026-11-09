@@ -310,3 +310,32 @@ mod tests {
         assert!(cidr_range("kein-ip").is_none());
     }
 }
+
+// --- Sprache der Texte, die das Backend erzeugt (Anomalie-Befunde, PCAP-Befunde, Fehlermeldungen der API, Mails,
+// Ländernamen aus GeoIP). Wird einmal beim Start aus `[server] language` bzw. SNIA_LANGUAGE gesetzt; Standard Deutsch.
+// Log-Meldungen bleiben deutsch.
+
+static ENGLISH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Sprache setzen: `true` = Englisch, `false` = Deutsch.
+pub fn set_english(english: bool) {
+    ENGLISH.store(english, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Werden Texte auf Englisch erzeugt?
+pub fn is_english() -> bool {
+    ENGLISH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Fester Text in der eingestellten Sprache.
+pub fn tr(de: &'static str, en: &'static str) -> &'static str {
+    if is_english() { en } else { de }
+}
+
+/// `format!` in der eingestellten Sprache: `trf!("{n} verbindungen", "{n} connections")`.
+#[macro_export]
+macro_rules! trf {
+    ($de:literal, $en:literal $(, $($arg:tt)*)?) => {
+        if $crate::is_english() { format!($en $(, $($arg)*)?) } else { format!($de $(, $($arg)*)?) }
+    };
+}

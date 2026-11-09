@@ -190,7 +190,7 @@ impl Database {
         // Nie Daten außerhalb des Retention-Fensters liefern – auch nicht, wenn der Cleanup noch nicht gelaufen ist
         let from = f.from.unwrap_or(to - 3_600_000).max(floor);
         if from > to {
-            return Err(DbError::InvalidFilter("Zeitfenster: from liegt nach to".into()));
+            return Err(DbError::InvalidFilter(model::tr("Zeitfenster: from liegt nach to", "time range: from is after to").into()));
         }
         let mut sql = String::from("ts >= ? AND ts <= ?");
         let mut params = vec![Value::Integer(from), Value::Integer(to)];
@@ -200,7 +200,7 @@ impl Database {
                 None => Ok(None),
                 Some(s) => cidr_range(s)
                     .map(|(lo, hi)| Some((lo.to_vec(), hi.to_vec())))
-                    .ok_or_else(|| DbError::InvalidFilter(format!("{label}: keine gültige IP/CIDR: {s}"))),
+                    .ok_or_else(|| DbError::InvalidFilter(model::trf!("{label}: keine gültige IP/CIDR: {s}", "{label}: not a valid IP/CIDR: {s}"))),
             }
         };
         if let Some((lo, hi)) = range("ip", &f.ip)? {
@@ -224,7 +224,7 @@ impl Database {
             params.push(Value::Integer(proto as i64));
         }
         if let Some(dir) = f.dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            let dir = Direction::parse(dir).ok_or_else(|| DbError::InvalidFilter(format!("dir: erlaubt sind in, out, internal, external – nicht {dir}")))?;
+            let dir = Direction::parse(dir).ok_or_else(|| DbError::InvalidFilter(model::trf!("dir: erlaubt sind in, out, internal, external – nicht {dir}", "dir: allowed are in, out, internal, external – not {dir}")))?;
             sql.push_str(" AND dir = ?");
             params.push(Value::Integer(dir.as_u8() as i64));
         }

@@ -1,0 +1,44 @@
+# Snia-Net-Mon mit Docker Compose
+#
+#   docker compose up -d                       # Monitor starten, Web-UI: http://127.0.0.1:8080
+#   docker compose --profile demo up -d        # zusätzlich Demo-Verkehr (flowgen), ganz ohne Firewall
+#
+# Danach am Exporter (Firewall, Router, softflowd …) NetFlow v9 oder IPFIX an <Docker-Host>:2055/udp schicken.
+
+services:
+  snia-net-mon:
+    build: .
+    image: snia-net-mon:latest
+    # Statt selbst zu bauen das fertige Image von GitHub nehmen (amd64 und arm64):
+    #   image: ghcr.io/<github-user>/snia-net-mon:latest   und die Zeilen "build: ." entfernen
+    restart: unless-stopped
+    ports:
+      # Web-UI nur lokal. Für den Zugriff aus dem Netz "8080:8080" schreiben UND SNIA_API_TOKEN setzen.
+      - "127.0.0.1:8080:8080"
+      - "2055:2055/udp"
+    environment:
+      TZ: ${TZ:-Europe/Vienna}
+      # Sprache der Befunde, Fehlermeldungen und Mails (en/de); die Web-UI schaltet selbst um (oben rechts)
+      SNIA_LANGUAGE: ${SNIA_LANGUAGE:-en}
+      SNIA_API_TOKEN: ${SNIA_API_TOKEN:-}
+      # GeoIP (kostenloses Konto auf maxmind.com) – leer = ohne Länder und ASN
+      MAXMIND_ACCOUNT_ID: ${MAXMIND_ACCOUNT_ID:-}
+      MAXMIND_LICENSE_KEY: ${MAXMIND_LICENSE_KEY:-}
+      SNIA_SMTP_PASSWORD: ${SNIA_SMTP_PASSWORD:-}
+    volumes:
+      - snia-data:/data
+      # Eigene Konfiguration (Vorlage: docker/config.toml und config.example.toml):
+      # - ./config.toml:/etc/snia-net-mon/config.toml:ro
+
+  # Demo-Verkehr: synthetische NetFlow-v9-Pakete an den Collector
+  flowgen:
+    build: .
+    image: snia-net-mon:latest
+    profiles: [demo]
+    restart: unless-stopped
+    depends_on: [snia-net-mon]
+    entrypoint: ["flowgen"]
+    command: ["--target", "snia-net-mon:2055", "--rate", "500", "--exporters", "2"]
+
+volumes:
+  snia-data:

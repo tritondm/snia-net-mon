@@ -3,6 +3,7 @@
   import { sankey as d3sankey, sankeyLinkHorizontal, sankeyJustify } from 'd3-sankey';
   import { fmtBytes, isPrivate, flag } from '../lib/format.js';
   import { searchFor } from '../lib/state.svelte.js';
+  import { t } from '../lib/i18n.svelte.js';
 
   let { graph = { nodes: [], links: [] } } = $props();
   let width = $state(900);
@@ -91,9 +92,9 @@
         style="left: {Math.min(tip.x + 14, width - 260)}px; top: {tip.y + 10}px">{tip.text}</div>
     {/if}
     <div class="flex justify-between px-1 pt-1 text-[10px] uppercase tracking-widest text-ctp-overlay0">
-      <span style="color: {COLORS.src}">quelle</span><span style="color: {COLORS.service}">dienst</span><span style="color: {COLORS.dst}">ziel</span>
+      <span style="color: {COLORS.src}">{t('quelle', 'source')}</span><span style="color: {COLORS.service}">{t('dienst', 'service')}</span><span style="color: {COLORS.dst}">{t('ziel', 'destination')}</span>
     </div>
   {:else}
-    <div class="flex h-40 items-center justify-center text-ctp-overlay0">keine Flows im Zeitfenster</div>
+    <div class="flex h-40 items-center justify-center text-ctp-overlay0">{t('keine Flows im Zeitfenster', 'no flows in the time window')}</div>
   {/if}
 </div>

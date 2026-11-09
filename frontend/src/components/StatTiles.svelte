@@ -1,6 +1,7 @@
 <script>
   import { live } from '../lib/live.svelte.js';
   import { DIRECTIONS, fmtBits, fmtNum } from '../lib/format.js';
+  import { t } from '../lib/i18n.svelte.js';
 
   // Mini-Sparkline aus den letzten 60 Sekunden
   function spark(values, w = 120, h = 28) {
@@ -15,8 +16,8 @@
     { label: `${DIRECTIONS.in.icon} Download`, value: fmtBits((now.bytes_in ?? 0) * 8), color: DIRECTIONS.in.color, path: spark(recent.map((p) => p.bytes_in ?? 0)) },
     { label: `${DIRECTIONS.out.icon} Upload`, value: fmtBits((now.bytes_out ?? 0) * 8), color: DIRECTIONS.out.color, path: spark(recent.map((p) => p.bytes_out ?? 0)) },
     { label: 'Flows / s', value: fmtNum(now.flows), color: '#cba6f7', path: spark(recent.map((p) => p.flows)) },
-    { label: 'Pakete / s', value: fmtNum(now.packets), color: '#94e2d5', path: spark(recent.map((p) => p.packets)) },
-    { label: 'Aktive Verbindungen', value: fmtNum(live.active), color: '#f9e2af', path: '' },
+    { label: t('Pakete / s', 'Packets / s'), value: fmtNum(now.packets), color: '#94e2d5', path: spark(recent.map((p) => p.packets)) },
+    { label: t('Aktive Verbindungen', 'Active connections'), value: fmtNum(live.active), color: '#f9e2af', path: '' },
   ]);
 </script>
 
@@ -32,7 +33,7 @@
           <path d={tile.path} fill="none" stroke={tile.color} stroke-width="1.5" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
         </svg>
       {:else}
-        <div class="text-right text-[11px] text-ctp-overlay0">letzte 90 s</div>
+        <div class="text-right text-[11px] text-ctp-overlay0">{t('letzte 90 s', 'last 90 s')}</div>
       {/if}
     </div>
   {/each}

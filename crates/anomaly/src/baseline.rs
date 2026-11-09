@@ -70,8 +70,8 @@ impl SlotKind {
     pub fn name(self) -> &'static str {
         match self {
             SlotKind::Host => "host",
-            SlotKind::Week => "gruppe wochentag+stunde",
-            SlotKind::Day => "gruppe stunde",
+            SlotKind::Week => model::tr("gruppe wochentag+stunde", "group weekday+hour"),
+            SlotKind::Day => model::tr("gruppe stunde", "group hour"),
         }
     }
 }

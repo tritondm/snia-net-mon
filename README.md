@@ -17,7 +17,8 @@ export.
 - **Backend:** Rust (Tokio, Axum), SQLite in WAL mode, one file per hour
 - **Frontend:** Svelte 5 + Tailwind, Catppuccin Mocha theme in Hyprland style (frosted glass, gradient borders, monospace)
 - **Status:** prototype – working and tested, see [limits & next steps](FEATURES.md#limits--next-steps)
-- **Language:** the web UI, log messages and the comments in `config.example.toml` are in German
+- **Language:** the web UI is in English and German (switch top right); findings, error messages and mails follow
+  `server.language` / `SNIA_LANGUAGE`. Log messages and the comments in `config.example.toml` are in German
 
 ![Dashboard with live throughput, active connections with GeoIP, traffic direction, protocols and top talkers; the five workspaces at the top](docs/screenshot.png)
 
@@ -45,10 +46,16 @@ export.
 
 | File | Contents |
 |---|---|
-| [INSTALL.md](INSTALL.md) | Requirements, quick start with demo traffic, GeoIP databases, setting up flow export on the exporter, configuration, security, development |
+| [INSTALL.md](INSTALL.md) | Requirements, Docker, quick start with demo traffic, GeoIP databases, setting up flow export on the exporter, configuration, security, development |
 | [FEATURES.md](FEATURES.md) | All features in detail: traffic direction, upload alert, **anomaly detection including the maths**, network rules, architecture, storage and retention, performance, API, limits |
 
-Quick try without a firewall (Rust ≥ 1.88, Node ≥ 20):
+Quick try without a firewall, with Docker:
+
+```bash
+docker compose --profile demo up -d             # web UI: http://127.0.0.1:8080, with demo traffic
+```
+
+Or from source (Rust ≥ 1.88, Node ≥ 20):
 
 ```bash
 cd frontend && npm install && npm run build && cd ..

@@ -98,33 +98,33 @@ fn parse_asn(value: &str) -> Option<(u32, Option<u16>)> {
 
 /// Eingabe prüfen und vereinheitlichen; die Fehlermeldung ist für die Web-UI gedacht.
 pub fn normalize(input: &ExceptionInput) -> Result<Normalized, String> {
-    let kind = Kind::parse(&input.kind).ok_or_else(|| format!("unbekannte art {:?}", input.kind))?;
+    let kind = Kind::parse(&input.kind).ok_or_else(|| model::trf!("unbekannte art {:?}", "unknown kind {:?}", input.kind))?;
     let host = non_empty(&input.host).map(str::to_string);
     if let Some(h) = &host {
-        LocalNetworks::parse(&[h]).map_err(|_| format!("host {h:?}: erwartet eine IP oder ein Netz wie 10.0.3.0/24"))?;
+        LocalNetworks::parse(&[h]).map_err(|_| model::trf!("host {h:?}: erwartet eine IP oder ein Netz wie 10.0.3.0/24", "host {h:?}: expected an IP or a network like 10.0.3.0/24"))?;
     }
     let target = match (kind, non_empty(&input.target)) {
         (_, None) => None,
         (Kind::Dns, Some(t)) => {
-            LocalNetworks::parse(&[t]).map_err(|_| format!("ziel {t:?}: erwartet die IP oder das Netz des Resolvers"))?;
+            LocalNetworks::parse(&[t]).map_err(|_| model::trf!("ziel {t:?}: erwartet die IP oder das Netz des Resolvers", "target {t:?}: expected the IP or network of the resolver"))?;
             Some(t.to_string())
         }
         (Kind::Beacon, Some(t)) => match parse_asn(t) {
             Some((asn, Some(port))) => Some(format!("AS{asn}:{port}")),
             Some((asn, None)) => Some(format!("AS{asn}")),
-            None if t.to_ascii_uppercase().starts_with("AS") => return Err(format!("ziel {t:?}: erwartet AS8075 oder AS8075:443")),
+            None if t.to_ascii_uppercase().starts_with("AS") => return Err(model::trf!("ziel {t:?}: erwartet AS8075 oder AS8075:443", "target {t:?}: expected AS8075 or AS8075:443")),
             None => {
-                LocalNetworks::parse(&[t]).map_err(|_| format!("ziel {t:?}: erwartet AS8075, AS8075:443 oder eine IP bzw. ein Netz"))?;
+                LocalNetworks::parse(&[t]).map_err(|_| model::trf!("ziel {t:?}: erwartet AS8075, AS8075:443 oder eine IP bzw. ein Netz", "target {t:?}: expected AS8075, AS8075:443 or an IP / network"))?;
                 Some(t.to_string())
             }
         },
         (Kind::Policy, Some(t)) => Some(t.to_string()),
         (Kind::Country, Some(t)) if t.len() == 2 && t.chars().all(|c| c.is_ascii_alphabetic()) => Some(t.to_ascii_uppercase()),
-        (Kind::Country, Some(t)) => return Err(format!("ziel {t:?}: erwartet einen Ländercode wie CN")),
-        (Kind::Stat | Kind::Ml | Kind::Scan | Kind::Drift, Some(_)) => return Err(format!("{}: hier gibt es kein ziel, nur einen host", kind.name())),
+        (Kind::Country, Some(t)) => return Err(model::trf!("ziel {t:?}: erwartet einen Ländercode wie CN", "target {t:?}: expected a country code like CN")),
+        (Kind::Stat | Kind::Ml | Kind::Scan | Kind::Drift, Some(_)) => return Err(model::trf!("{}: hier gibt es kein ziel, nur einen host", "{}: there is no target here, only a host", kind.name())),
     };
     if host.is_none() && target.is_none() {
-        return Err("host oder ziel angeben – sonst wäre die ganze art ausgenommen".into());
+        return Err(model::tr("host oder ziel angeben – sonst wäre die ganze art ausgenommen", "specify a host or target – otherwise the whole kind would be excepted").into());
     }
     Ok(Normalized { kind, host, target, comment: input.comment.trim().to_string(), expires_ms: input.expires_ms })
 }

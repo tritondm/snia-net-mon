@@ -4,6 +4,7 @@
   import { untrack } from 'svelte';
   import { api } from '../lib/api.js';
   import { KINDS, TARGET_HINT } from '../lib/anomaly.js';
+  import { t } from '../lib/i18n.svelte.js';
 
   // value: { id?, kind, host, target, comment, expires_ms }; targets: Vorschläge fürs Ziel; event: Auffälligkeit (optional)
   let { value, targets = [], event = null, onclose, onsaved } = $props();
@@ -19,9 +20,9 @@
   const scopes = $derived(
     event && hint && targets.length
       ? [
-          ['nur dieser host', event.host, ''],
-          ['host + ziel', event.host, targets[0]],
-          ['alle hosts zu diesem ziel', '', targets[0]],
+          [t('nur dieser host', 'this host only'), event.host, ''],
+          [t('host + ziel', 'host + target'), event.host, targets[0]],
+          [t('alle hosts zu diesem ziel', 'all hosts to this target'), '', targets[0]],
         ]
       : [],
   );
@@ -56,13 +57,13 @@
 
 <div class="fixed inset-0 z-50 flex items-center justify-center bg-ctp-crust/70 p-4 backdrop-blur-sm">
   <form class="window window-active grid w-full max-w-lg gap-3 p-5" onsubmit={save}>
-    <div class="text-ctp-subtext1">{value.id ? `ausnahme #${value.id} bearbeiten` : 'ausnahme anlegen'}</div>
+    <div class="text-ctp-subtext1">{value.id ? t(`ausnahme #${value.id} bearbeiten`, `edit exception #${value.id}`) : t('ausnahme anlegen', 'create exception')}</div>
     {#if event}
-      <div class="text-[11px] text-ctp-overlay0">aus: {event.title}</div>
+      <div class="text-[11px] text-ctp-overlay0">{t('aus', 'from')}: {event.title}</div>
     {/if}
 
     <label>
-      <span class="label">art</span>
+      <span class="label">{t('art', 'kind')}</span>
       <select class="input" bind:value={form.kind}>
         {#each Object.entries(KINDS) as [k, v]}<option value={k}>{v.label}</option>{/each}
       </select>
@@ -82,38 +83,38 @@
 
     <label>
       <span class="label">host</span>
-      <input class="input" placeholder="ip oder netz, z. b. 10.4.3.200 oder 10.6.0.0/16 – leer = alle hosts" bind:value={form.host} />
+      <input class="input" placeholder={t('ip oder netz, z. b. 10.4.3.200 oder 10.6.0.0/16 – leer = alle hosts', 'ip or network, e.g. 10.4.3.200 or 10.6.0.0/16 – empty = all hosts')} bind:value={form.host} />
     </label>
 
     {#if hint}
       <label>
-        <span class="label">ziel</span>
+        <span class="label">{t('ziel', 'target')}</span>
         <input class="input" placeholder={hint} list="exception-targets" bind:value={form.target} />
-        <datalist id="exception-targets">{#each targets as t}<option value={t}></option>{/each}</datalist>
-        <span class="mt-1 block text-[11px] text-ctp-overlay0">leer = alle ziele dieses hosts</span>
+        <datalist id="exception-targets">{#each targets as tk}<option value={tk}></option>{/each}</datalist>
+        <span class="mt-1 block text-[11px] text-ctp-overlay0">{t('leer = alle ziele dieses hosts', 'empty = all targets of this host')}</span>
       </label>
     {:else}
-      <div class="text-[11px] text-ctp-overlay0">bei {KINDS[form.kind].label} gilt die ausnahme nur für den host</div>
+      <div class="text-[11px] text-ctp-overlay0">{t(`bei ${KINDS[form.kind].label} gilt die ausnahme nur für den host`, `for ${KINDS[form.kind].label} the exception applies to the host only`)}</div>
     {/if}
 
     <label>
-      <span class="label">kommentar</span>
-      <input class="input" placeholder="z. b. domain-controller, löst selbst extern auf" bind:value={form.comment} />
+      <span class="label">{t('kommentar', 'comment')}</span>
+      <input class="input" placeholder={t('z. b. domain-controller, löst selbst extern auf', 'e.g. domain controller, resolves externally itself')} bind:value={form.comment} />
     </label>
 
     <label>
-      <span class="label">gilt bis (optional)</span>
+      <span class="label">{t('gilt bis (optional)', 'expires (optional)')}</span>
       <div class="flex gap-2">
         <input class="input" type="date" bind:value={expires} />
-        {#if expires}<button type="button" class="btn" onclick={() => (expires = '')}>unbefristet</button>{/if}
+        {#if expires}<button type="button" class="btn" onclick={() => (expires = '')}>{t('unbefristet', 'never')}</button>{/if}
       </div>
     </label>
 
     {#if error}<div class="rounded-lg border border-ctp-red/40 bg-ctp-red/10 px-3 py-2 text-ctp-red">{error}</div>{/if}
 
     <div class="flex justify-end gap-2">
-      <button type="button" class="btn" onclick={onclose}>abbrechen</button>
-      <button type="submit" class="btn btn-primary" disabled={busy}>speichern</button>
+      <button type="button" class="btn" onclick={onclose}>{t('abbrechen', 'cancel')}</button>
+      <button type="submit" class="btn btn-primary" disabled={busy}>{t('speichern', 'save')}</button>
     </div>
   </form>
 </div>

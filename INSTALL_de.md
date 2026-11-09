@@ -6,6 +6,7 @@ Wie Snia-Net-Mon gebaut, gestartet und an einen Exporter angebunden wird. Was di
 [FEATURES_de.md](FEATURES_de.md), der Überblick in der [README](README_de.md).
 
 - [Voraussetzungen](#voraussetzungen)
+- [Docker](#docker)
 - [Schnellstart (Demo ohne Exporter)](#schnellstart-demo-ohne-exporter)
 - [GeoIP-Datenbanken](#geoip-datenbanken)
 - [Flow-Export einrichten](#flow-export-einrichten)
@@ -21,6 +22,32 @@ Wie Snia-Net-Mon gebaut, gestartet und an einen Exporter angebunden wird. Was di
 - Ein Exporter, der **NetFlow v9 oder IPFIX** sendet – zum Ausprobieren reicht der mitgelieferte Generator `flowgen`
 - Plattenplatz: 48 h Rohdaten bei 1.000 Flows/s sind rund 30 GB, dazu die Historie (Standard bis 50 GB). Im kleinen
   Netz ist es ein Bruchteil davon.
+
+## Docker
+
+Ohne Rust und Node – das Image baut Frontend und Backend selbst:
+
+```bash
+docker compose up -d                        # Web-UI: http://127.0.0.1:8080, Collector: UDP 2055
+docker compose --profile demo up -d         # zusätzlich Demo-Verkehr von flowgen
+```
+
+Einstellungen über Umgebungsvariablen (z. B. in einer `.env`-Datei neben `docker-compose.yml`):
+
+| Variable | Bedeutung |
+|---|---|
+| `SNIA_LANGUAGE` | Sprache der Befunde, Fehlermeldungen und Mails: `de` oder `en` (in Compose Standard `en`). Die Web-UI schaltet selbst um (oben rechts). |
+| `SNIA_API_TOKEN` | Zugriffsschutz für die Web-UI – Pflicht, bevor Port 8080 über localhost hinaus freigegeben wird |
+| `MAXMIND_ACCOUNT_ID`, `MAXMIND_LICENSE_KEY` | GeoIP-Datenbanken werden automatisch geladen und aktualisiert |
+| `TZ` | Zeitzone für die Anomalie-Erkennung, z. B. `Europe/Vienna` |
+| `SNIA_SMTP_PASSWORD` | SMTP-Passwort, falls Mails eingerichtet sind |
+
+Die Daten liegen im Volume `snia-data` (`/data` im Container). Für eigene Netze, Alarme und Mails
+[`docker/config.toml`](docker/config.toml) kopieren, um Optionen aus `config.example.toml` ergänzen und einbinden – die
+Zeile ist in `docker-compose.yml` vorbereitet. Die Pfade unter `/data` und `listen = "0.0.0.0:…"` beibehalten.
+
+Mit dem Port-Mapping von Docker bleibt die Adresse des Exporters normalerweise erhalten. Kommen die Flows stattdessen
+mit der Gateway-Adresse des Docker-Netzes an, für den Dienst `snia-net-mon` `network_mode: host` verwenden.
 
 ## Schnellstart (Demo ohne Exporter)
 

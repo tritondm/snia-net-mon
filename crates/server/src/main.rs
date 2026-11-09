@@ -43,12 +43,31 @@ struct ServerConfig {
     listen: SocketAddr,
     frontend_dir: PathBuf,
     api_token: String,
+    /// Sprache der Texte, die das Backend erzeugt (Befunde, Fehlermeldungen, Mails): "de" oder "en".
+    /// Die Web-UI wählt ihre Sprache selbst (Browser bzw. Umschalter oben rechts).
+    language: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { listen: "127.0.0.1:8080".parse().expect("Adresse"), frontend_dir: "frontend/dist".into(), api_token: String::new() }
+        Self {
+            listen: "127.0.0.1:8080".parse().expect("Adresse"),
+            frontend_dir: "frontend/dist".into(),
+            api_token: String::new(),
+            language: "de".into(),
+        }
     }
+}
+
+/// Sprache aus SNIA_LANGUAGE (Vorrang) oder `[server] language` setzen.
+fn set_language(config: &ServerConfig) -> Result<()> {
+    let value = std::env::var("SNIA_LANGUAGE").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| config.language.clone());
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "de" => model::set_english(false),
+        "en" => model::set_english(true),
+        other => anyhow::bail!("server.language {other:?}: erlaubt sind de und en"),
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -524,17 +543,21 @@ fn spawn_disk_mail(database: db::Database, mailer: alert::Mailer, mut shutdown: 
                 continue;
             }
             let gb = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
-            let body = format!(
+            let body = model::trf!(
                 "Auf dem Datenträger von Snia-Net-Mon ist wenig Platz frei: {:.1} GB von {:.1} GB (Grenze storage.min_free_gb = {:.1} GB).\n\n\
                  Die ältesten Daten werden automatisch gelöscht (erst Archive, dann Historie, zuletzt Live-Stunden).\n\
                  Wegen voller Platte nicht gespeicherte Flows bisher: {}\n\n\
                  Abhilfe: Platte vergrößern oder history.max_size_gb / history.archive_retention_days senken.\n",
+                "Little space is left on the Snia-Net-Mon disk: {:.1} GB of {:.1} GB free (limit storage.min_free_gb = {:.1} GB).\n\n\
+                 The oldest data is deleted automatically (archives first, then history, live hours last).\n\
+                 Flows not stored so far because of a full disk: {}\n\n\
+                 Remedy: enlarge the disk or lower history.max_size_gb / history.archive_retention_days.\n",
                 gb(stats.disk_free_bytes),
                 gb(stats.disk_total_bytes),
                 gb(stats.disk_min_free_bytes),
                 stats.disk_dropped_flows,
             );
-            match mailer.send("[snia-net-mon] Wenig Plattenplatz", &body).await {
+            match mailer.send(model::tr("[snia-net-mon] Wenig Plattenplatz", "[snia-net-mon] Low disk space"), &body).await {
                 Ok(()) => last_mail = Some(std::time::Instant::now()),
                 Err(err) => tracing::warn!(%err, "Plattenplatz-Mail fehlgeschlagen"),
             }
@@ -549,10 +572,17 @@ async fn main() -> Result<()> {
         .init();
     let args = parse_args();
     let config = load_config(args.config)?;
+    set_language(&config.server)?;
     if args.test_mail {
         let mailer = config.email.mailer()?.context("email.smtp_host ist leer – kein Mailversand konfiguriert")?;
         mailer
-            .send("[snia-net-mon] Test-Mail", "Diese Test-Mail bestätigt, dass der Mailversand von Snia-Net-Mon funktioniert.\n")
+            .send(
+                model::tr("[snia-net-mon] Test-Mail", "[snia-net-mon] Test mail"),
+                model::tr(
+                    "Diese Test-Mail bestätigt, dass der Mailversand von Snia-Net-Mon funktioniert.\n",
+                    "This test mail confirms that Snia-Net-Mon can send mail.\n",
+                ),
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Test-Mail fehlgeschlagen: {e}"))?;
         println!("Test-Mail gesendet an {}", mailer.recipients());
@@ -683,7 +713,9 @@ async fn main() -> Result<()> {
     .with_context(|| format!("UDP {} konnte nicht geöffnet werden", config.collector.listen))?;
 
     // --- Web-Server
-    let token = config.server.api_token.trim();
+    // SNIA_API_TOKEN (z. B. aus docker compose) hat Vorrang vor server.api_token
+    let token = std::env::var("SNIA_API_TOKEN").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| config.server.api_token.clone());
+    let token = token.trim();
     if token.is_empty() && !config.server.listen.ip().is_loopback() {
         tracing::warn!("Web-UI ist ohne api_token aus dem Netz erreichbar – bitte api_token setzen");
     }

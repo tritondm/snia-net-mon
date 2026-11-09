@@ -1,4 +1,5 @@
 // Anzeigeformate und kleine Helfer.
+import { t, locale } from './i18n.svelte.js';
 
 const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
 const BIT_UNITS = ['bit/s', 'kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s'];
@@ -33,12 +34,12 @@ export function fmtNum(value) {
 
 export function fmtTime(ms, withDate = false) {
   const d = new Date(ms);
-  const time = d.toLocaleTimeString('de-AT', { hour12: false });
-  return withDate ? `${d.toLocaleDateString('de-AT', { day: '2-digit', month: '2-digit' })} ${time}` : time;
+  const time = d.toLocaleTimeString(locale(), { hour12: false });
+  return withDate ? `${d.toLocaleDateString(locale(), { day: '2-digit', month: '2-digit' })} ${time}` : time;
 }
 
 export function fmtDate(ms) {
-  return new Date(ms).toLocaleString('de-AT', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+  return new Date(ms).toLocaleString(locale(), { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 export function fmtAgo(ms, now = Date.now()) {
@@ -73,10 +74,11 @@ export function isPrivate(ip = '') {
 
 /** Verkehrsrichtung relativ zu den internen Netzen (siehe network.local_networks in config.toml). */
 export const DIRECTIONS = {
-  in: { icon: '↓', label: 'download', title: 'eingehend: extern → intern', color: '#74c7ec' },
-  out: { icon: '↑', label: 'upload', title: 'ausgehend: intern → extern', color: '#fab387' },
-  internal: { icon: '⇄', label: 'intern', title: 'zwischen internen Netzen', color: '#cba6f7' },
-  external: { icon: '⤳', label: 'extern', title: 'weder Quelle noch Ziel intern', color: '#9399b2' },
+  // label/title als Getter, damit sie beim Sprachwechsel neu gelesen werden
+  in: { icon: '↓', label: 'download', get title() { return t('eingehend: extern → intern', 'inbound: external → internal'); }, color: '#74c7ec' },
+  out: { icon: '↑', label: 'upload', get title() { return t('ausgehend: intern → extern', 'outbound: internal → external'); }, color: '#fab387' },
+  internal: { icon: '⇄', get label() { return t('intern', 'internal'); }, get title() { return t('zwischen internen Netzen', 'between internal networks'); }, color: '#cba6f7' },
+  external: { icon: '⤳', get label() { return t('extern', 'external'); }, get title() { return t('weder Quelle noch Ziel intern', 'neither source nor destination internal'); }, color: '#9399b2' },
 };
 
 export const PROTO_COLORS = {

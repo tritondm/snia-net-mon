@@ -23,6 +23,20 @@ pub const COUNTRIES: usize = 6;
 /// Anzeigenamen der Merkmale (Reihenfolge wie die Indizes oben).
 pub const NAMES: [&str; FEATURES] = ["upload", "download", "flows", "externe ziele", "interne ziele", "ports", "länder"];
 
+/// Anzeigename eines Merkmals in der eingestellten Sprache (`NAMES` bleibt die interne Kennung, z. B. im Tag).
+pub fn label(name: &str) -> &str {
+    if !model::is_english() {
+        return name;
+    }
+    match name {
+        "externe ziele" => "external destinations",
+        "interne ziele" => "internal destinations",
+        "länder" => "countries",
+        "upload-anteil" => "upload share",
+        other => other,
+    }
+}
+
 /// Merkmale, deren Wert eine Datenmenge in Byte ist (für die Anzeige).
 pub fn is_bytes(feature: usize) -> bool {
     feature == UP || feature == DOWN

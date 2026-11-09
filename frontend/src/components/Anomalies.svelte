@@ -8,6 +8,7 @@
   import { api } from '../lib/api.js';
   import { searchFor } from '../lib/state.svelte.js';
   import { fmtBytes, fmtDate, fmtNum, flag, geoTitle, serviceName } from '../lib/format.js';
+  import { t, locale } from '../lib/i18n.svelte.js';
 
   let status = $state(null);
   let rows = $state([]);
@@ -24,11 +25,11 @@
   const HOUR = 3_600_000;
   const DAY = 24 * HOUR;
   // [Wert, Anzeige, Zeitraum, Abschnitt der Zeitleiste]
-  const RANGES = [
+  const RANGES = $derived([
     ['24h', '24 h', DAY, HOUR],
-    ['7d', '7 tage', 7 * DAY, 6 * HOUR],
-    ['30d', '30 tage', 30 * DAY, DAY],
-  ];
+    ['7d', t('7 tage', '7 days'), 7 * DAY, 6 * HOUR],
+    ['30d', t('30 tage', '30 days'), 30 * DAY, DAY],
+  ]);
   const range = () => RANGES.find((r) => r[0] === filter.range) ?? RANGES[0];
 
   const IP_RE = /(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7})/gi;
@@ -37,8 +38,8 @@
     if (!geo) return [{ text }];
     return String(text)
       .split(IP_RE)
-      .filter((t) => t !== '')
-      .map((t) => (geo[t] ? { text: t, geo: geo[t] } : { text: t }));
+      .filter((seg) => seg !== '')
+      .map((seg) => (geo[seg] ? { text: seg, geo: geo[seg] } : { text: seg }));
   }
 
   /** Beginn der Zeitleiste, ausgerichtet auf volle Stunden bzw. Tage in Ortszeit; der letzte Abschnitt enthält jetzt. */
@@ -64,7 +65,7 @@
       error = '';
       disabled = false;
     } catch (err) {
-      if (/abgeschaltet/.test(err.message)) disabled = true;
+      if (/abgeschaltet|disabled/.test(err.message)) disabled = true;
       else error = err.message;
     }
   }
@@ -87,7 +88,7 @@
   const learnFill = $derived(status?.learning_days ? Math.min(1, learnedDays / status.learning_days) : 1);
   const ml = $derived(status?.ml);
   // welche Arten ab welcher Schwere per Mail gehen
-  const mailKinds = $derived(Object.entries(status?.mail_kinds ?? {}).map(([k, min]) => `${(KINDS[k] ?? KINDS.stat).label} ab ${SEVERITY[min]?.[1] ?? min}`));
+  const mailKinds = $derived(Object.entries(status?.mail_kinds ?? {}).map(([k, min]) => `${(KINDS[k] ?? KINDS.stat).label} ${t('ab', 'from')} ${SEVERITY[min]?.[1] ?? min}`));
   const fmtValue = (f) => (f.bytes ? fmtBytes(f.value) : f.percent ? `${Math.round(f.value * 100)} %` : fmtNum(f.value));
   // Zeitleiste: gestapelte Balken je Abschnitt (unten hoch, darüber warnung und info)
   const TL_H = 96;
@@ -99,8 +100,8 @@
   const tlY = (n) => ((TL_H - TL_PAD.t - TL_PAD.b) * n) / tlMax;
   const tlLabel = (ts) => {
     const d = new Date(ts);
-    if (range()[3] >= DAY) return d.toLocaleDateString('de-AT', { day: '2-digit', month: '2-digit' });
-    if (range()[3] > HOUR) return `${d.toLocaleDateString('de-AT', { day: '2-digit', month: '2-digit' })} ${String(d.getHours()).padStart(2, '0')}h`;
+    if (range()[3] >= DAY) return d.toLocaleDateString(locale(), { day: '2-digit', month: '2-digit' });
+    if (range()[3] > HOUR) return `${d.toLocaleDateString(locale(), { day: '2-digit', month: '2-digit' })} ${String(d.getHours()).padStart(2, '0')}h`;
     return `${String(d.getHours()).padStart(2, '0')}:00`;
   };
   // höchstens ~8 Beschriftungen auf der Zeitachse
@@ -174,12 +175,12 @@
   <div class="mt-0.5 grid grid-cols-[repeat(auto-fill,minmax(22rem,1fr))] gap-x-4 tabular-nums">
     {#each peers ?? [] as p}
       <div class="truncate">
-        <button class="text-ctp-teal hover:underline" title="flows mit dieser ip in diesem fenster" onclick={() => searchFor({ ip: p.ip, ...contextRange(from) })}>{p.ip}</button
+        <button class="text-ctp-teal hover:underline" title={t('flows mit dieser ip in diesem fenster', 'flows with this ip in this window')} onclick={() => searchFor({ ip: p.ip, ...contextRange(from) })}>{p.ip}</button
         ><span class="text-ctp-overlay1">:{p.port}</span>
         {#if geo?.[p.ip]}<span class="text-ctp-overlay1" title={geoTitle(geo[p.ip])}> {flag(geo[p.ip].cc)} {geo[p.ip].cc ?? ''}{geo[p.ip].org ? `, ${geo[p.ip].org}` : ''}</span
           >{:else if p.cc}<span class="text-ctp-overlay1"> {flag(p.cc)} {p.cc}</span>{/if}
         <span class="text-ctp-overlay0"> · {p.flows} flows · {fmtBytes(p.bytes)}↑</span>
-        {#if p.served}<span class="chip ml-1 !py-0 text-ctp-overlay1" title="die gegenstelle hat verbunden, der host hat nur geantwortet (er ist hier der server)">eingehend</span>{/if}
+        {#if p.served}<span class="chip ml-1 !py-0 text-ctp-overlay1" title={t('die gegenstelle hat verbunden, der host hat nur geantwortet (er ist hier der server)', 'the peer connected, the host only answered (it is the server here)')}>{t('eingehend', 'inbound')}</span>{/if}
       </div>
     {/each}
   </div>
@@ -189,7 +190,7 @@
 {#snippet hostContext(c, geo)}
   {#if c}
     <div class="mt-2 text-ctp-overlay1">
-      im fenster {fmtDate(c.from_ms)} – {fmtDate(c.from_ms + windowLen())}: {c.ext_peers} externe ziele · {c.int_peers} interne ziele · größte ziele:
+      {t('im fenster', 'in the window')} {fmtDate(c.from_ms)} – {fmtDate(c.from_ms + windowLen())}: {c.ext_peers} {t('externe ziele', 'external destinations')} · {c.int_peers} {t('interne ziele', 'internal destinations')} · {t('größte ziele', 'biggest destinations')}:
     </div>
     {@render peerList(c.peers, geo, c.from_ms)}
     {#if c.ports?.length}
@@ -200,9 +201,9 @@
     {/if}
     {#if c.countries?.length}
       <div class="mt-1 flex flex-wrap gap-1.5">
-        <span class="text-ctp-overlay1">länder:</span>
-        {#each c.countries as k}<span class="chip !py-0 {k.opened ? '' : 'text-ctp-overlay0'}" title={k.opened ? '' : 'nur antworten an clients von dort'}
-            >{flag(k.cc)} {k.cc} <span class="text-ctp-overlay0">· {fmtBytes(k.bytes)}{k.opened ? '' : ' · eingehend'}</span></span
+        <span class="text-ctp-overlay1">{t('länder', 'countries')}:</span>
+        {#each c.countries as k}<span class="chip !py-0 {k.opened ? '' : 'text-ctp-overlay0'}" title={k.opened ? '' : t('nur antworten an clients von dort', 'only replies to clients from there')}
+            >{flag(k.cc)} {k.cc} <span class="text-ctp-overlay0">· {fmtBytes(k.bytes)}{k.opened ? '' : ` · ${t('eingehend', 'inbound')}`}</span></span
           >{/each}
       </div>
     {/if}
@@ -211,36 +212,36 @@
 
 <div class="grid grid-cols-1 gap-2.5">
   {#if disabled}
-    <Window title="Anomalie-Erkennung">
-      <div class="py-8 text-center text-ctp-overlay1">abgeschaltet – in config.toml unter <span class="text-ctp-text">[anomaly]</span> enabled = true setzen</div>
+    <Window title={t('Anomalie-Erkennung', 'Anomaly detection')}>
+      <div class="py-8 text-center text-ctp-overlay1">{t('abgeschaltet – in config.toml unter', 'disabled – set in config.toml under')} <span class="text-ctp-text">[anomaly]</span> enabled = true{t(' setzen', '')}</div>
     </Window>
   {:else}
-    <Window title="Erkennung" subtitle="baseline je netzgruppe und host · feste regeln · isolation forest als zweite meinung">
+    <Window title={t('Erkennung', 'Detection')} subtitle={t('baseline je netzgruppe und host · feste regeln · isolation forest als zweite meinung', 'baseline per network group and host · fixed rules · isolation forest as a second opinion')}>
       {#if error}<div class="mb-3 rounded-lg border border-ctp-red/40 bg-ctp-red/10 px-3 py-2 text-ctp-red">{error}</div>{/if}
       {#if status}
         <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <div class="rounded-lg border border-ctp-surface0/70 bg-ctp-mantle/40 p-3">
-            <div class="label">1 · lernphase</div>
+            <div class="label">1 · {t('lernphase', 'learning phase')}</div>
             {#if status.learning}
-              <div class="text-ctp-yellow">lernt noch · {learnedDays.toFixed(1)} von {status.learning_days} tagen</div>
+              <div class="text-ctp-yellow">{t('lernt noch', 'still learning')} · {learnedDays.toFixed(1)} {t('von', 'of')} {status.learning_days} {t('tagen', 'days')}</div>
             {:else}
-              <div class="text-ctp-green">aktiv seit {fmtDate(status.started_ms + status.learning_days * DAY)}</div>
+              <div class="text-ctp-green">{t('aktiv seit', 'active since')} {fmtDate(status.started_ms + status.learning_days * DAY)}</div>
             {/if}
             <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-ctp-surface0/70">
               <div class="h-full rounded-full" style="width: {Math.max(1, learnFill * 100)}%; background: linear-gradient(90deg, #94e2d5, #cba6f7)"></div>
             </div>
-            <div class="mt-2 text-[11px] text-ctp-overlay0">portscan, externes dns, netz-regeln und beaconing melden sofort, statistik, schleichender anstieg, ml und neue länder erst nach der lernphase</div>
+            <div class="mt-2 text-[11px] text-ctp-overlay0">{t('portscan, externes dns, netz-regeln und beaconing melden sofort, statistik, schleichender anstieg, ml und neue länder erst nach der lernphase', 'port scan, external dns, network rules and beaconing report immediately; statistics, creeping increase, ml and new countries only after the learning phase')}</div>
           </div>
 
           <div class="rounded-lg border border-ctp-surface0/70 bg-ctp-mantle/40 p-3">
-            <div class="label">2 · baseline (statistik)</div>
-            <div class="text-ctp-text">{status.groups} gruppen · {status.host_profiles} host-profile</div>
+            <div class="label">2 · baseline ({t('statistik', 'statistics')})</div>
+            <div class="text-ctp-text">{status.groups} {t('gruppen', 'groups')} · {status.host_profiles} {t('host-profile', 'host profiles')}</div>
             <div class="mt-1 text-[11px] text-ctp-overlay0">
-              fenster {status.window_minutes} min · meldung ab z ≥ {status.z_threshold} und mindestwert · zeitzone {status.timezone}
+              {t('fenster', 'window')} {status.window_minutes} min · {t('meldung ab', 'report at')} z ≥ {status.z_threshold} {t('und mindestwert', 'and minimum value')} · {t('zeitzone', 'time zone')} {status.timezone}
             </div>
             {#if status.last_window}
               <div class="mt-1 text-[11px] text-ctp-overlay0">
-                letztes fenster {fmtDate(status.last_window.end_ms)} · {status.last_window.hosts} hosts{status.last_window.partial ? ' · unvollständig (nur regeln)' : ''}
+                {t('letztes fenster', 'last window')} {fmtDate(status.last_window.end_ms)} · {status.last_window.hosts} hosts{status.last_window.partial ? t(' · unvollständig (nur regeln)', ' · incomplete (rules only)') : ''}
               </div>
             {/if}
           </div>
@@ -248,45 +249,48 @@
           <div class="rounded-lg border border-ctp-surface0/70 bg-ctp-mantle/40 p-3">
             <div class="label">3 · isolation forest (ml)</div>
             {#if !ml.enabled}
-              <div class="text-ctp-overlay1">abgeschaltet</div>
+              <div class="text-ctp-overlay1">{t('abgeschaltet', 'disabled')}</div>
             {:else if ml.trained_ms}
-              <div class="text-ctp-text">trainiert {fmtDate(ml.trained_ms)}</div>
+              <div class="text-ctp-text">{t('trainiert', 'trained')} {fmtDate(ml.trained_ms)}</div>
               <div class="mt-1 text-[11px] text-ctp-overlay0">
-                {fmtNum(ml.trained_vectors)} vektoren · {ml.trees} bäume · schwelle {ml.effective_threshold?.toFixed(2)}
+                {fmtNum(ml.trained_vectors)} {t('vektoren', 'vectors')} · {ml.trees} {t('bäume', 'trees')} · {t('schwelle', 'threshold')} {ml.effective_threshold?.toFixed(2)}
                 {#if ml.quantiles}· training median {ml.quantiles.p50.toFixed(2)}, p99 {ml.quantiles.p99.toFixed(2)}, max {ml.quantiles.max.toFixed(2)}{/if}
               </div>
             {:else}
-              <div class="text-ctp-yellow">sammelt daten · {fmtNum(ml.stored_vectors)} / {fmtNum(ml.min_vectors)} vektoren</div>
-              <div class="mt-1 text-[11px] text-ctp-overlay0">training nach der lernphase, danach täglich mit den letzten {ml.training_days} tagen (ohne ip-adressen)</div>
+              <div class="text-ctp-yellow">{t('sammelt daten', 'collecting data')} · {fmtNum(ml.stored_vectors)} / {fmtNum(ml.min_vectors)} {t('vektoren', 'vectors')}</div>
+              <div class="mt-1 text-[11px] text-ctp-overlay0">{t(`training nach der lernphase, danach täglich mit den letzten ${ml.training_days} tagen (ohne ip-adressen)`, `training after the learning phase, then daily with the last ${ml.training_days} days (without ip addresses)`)}</div>
             {/if}
           </div>
 
           <div class="rounded-lg border border-ctp-surface0/70 bg-ctp-mantle/40 p-3">
-            <div class="label">4 · letzte 24 h</div>
+            <div class="label">4 · {t('letzte 24 h', 'last 24 h')}</div>
             <div class="flex flex-wrap gap-2">
-              <span class="chip"><span class="led bg-ctp-red"></span>hoch {status.counts_24h.high}</span>
-              <span class="chip"><span class="led bg-ctp-yellow"></span>warnung {status.counts_24h.warn}</span>
+              <span class="chip"><span class="led bg-ctp-red"></span>{t('hoch', 'high')} {status.counts_24h.high}</span>
+              <span class="chip"><span class="led bg-ctp-yellow"></span>{t('warnung', 'warning')} {status.counts_24h.warn}</span>
               <span class="chip"><span class="led bg-ctp-overlay0"></span>info {status.counts_24h.info}</span>
             </div>
             <div class="mt-2 text-[11px] text-ctp-overlay0">
-              netz-regeln: {status.policy_rules ? `${status.policy_rules} regeln, ${status.policy_zones} zonen` : 'keine'} · beaconing {status.beacon ? `an (${fmtNum(status.beacon_pairs)} paare)` : 'aus'} · schleichend {status.drift ? `an (${status.drift_rising} steigend)` : 'aus'} · mails {status.mail ? (mailKinds.length ? 'an' : 'an, aber alle arten aus') : 'aus'}
+              {t('netz-regeln', 'network rules')}: {status.policy_rules ? t(`${status.policy_rules} regeln, ${status.policy_zones} zonen`, `${status.policy_rules} rules, ${status.policy_zones} zones`) : t('keine', 'none')} · beaconing {status.beacon ? t(`an (${fmtNum(status.beacon_pairs)} paare)`, `on (${fmtNum(status.beacon_pairs)} pairs)`) : t('aus', 'off')} · {t('schleichend', 'creeping')} {status.drift ? t(`an (${status.drift_rising} steigend)`, `on (${status.drift_rising} rising)`) : t('aus', 'off')} · mails {status.mail ? (mailKinds.length ? t('an', 'on') : t('an, aber alle arten aus', 'on, but all kinds off')) : t('aus', 'off')}
             </div>
             {#if status.mail && mailKinds.length}
-              <div class="mt-1 text-[11px] text-ctp-overlay0" title="[anomaly] mail_min_severity und mail_kinds">mails für: {mailKinds.join(', ')}</div>
+              <div class="mt-1 text-[11px] text-ctp-overlay0" title="[anomaly] mail_min_severity, mail_kinds">{t('mails für', 'mails for')}: {mailKinds.join(', ')}</div>
             {/if}
           </div>
         </div>
       {/if}
     </Window>
 
-    <Window title="Zeitleiste" subtitle="aktive auffälligkeiten je {range()[3] >= DAY ? 'tag' : range()[3] > HOUR ? `${range()[3] / HOUR} stunden` : 'stunde'} · klick auf einen balken filtert die liste">
+    <Window
+      title={t('Zeitleiste', 'Timeline')}
+      subtitle="{t('aktive auffälligkeiten je', 'active anomalies per')} {range()[3] >= DAY ? t('tag', 'day') : range()[3] > HOUR ? `${range()[3] / HOUR} ${t('stunden', 'hours')}` : t('stunde', 'hour')} · {t('klick auf einen balken filtert die liste', 'click a bar to filter the list')}"
+    >
       {#snippet actions()}
-        <span class="chip"><span class="led bg-ctp-red"></span>hoch</span>
-        <span class="chip"><span class="led bg-ctp-yellow"></span>warnung</span>
+        <span class="chip"><span class="led bg-ctp-red"></span>{t('hoch', 'high')}</span>
+        <span class="chip"><span class="led bg-ctp-yellow"></span>{t('warnung', 'warning')}</span>
         <span class="chip"><span class="led bg-ctp-overlay0"></span>info</span>
       {/snippet}
       <div bind:clientWidth={tlWidth} class="w-full min-w-0 overflow-hidden">
-        <svg width="100%" height={TL_H} class="block select-none" role="img" aria-label="Zeitleiste der Auffälligkeiten">
+        <svg width="100%" height={TL_H} class="block select-none" role="img" aria-label={t('Zeitleiste der Auffälligkeiten', 'Timeline of anomalies')}>
           {#each tlTicks as n}
             {@const y = TL_H - TL_PAD.b - tlY(n)}
             <line x1={TL_PAD.l} x2={tlWidth - TL_PAD.r} y1={y} y2={y} class="stroke-ctp-surface0" stroke-dasharray="2 4" />
@@ -306,7 +310,7 @@
               onkeydown={(e) => e.key === 'Enter' && pick(b)}
               opacity={slot && !selected ? 0.35 : 1}
             >
-              <title>{tlLabel(b.ts)} · hoch {b.high} · warnung {b.warn} · info {b.info}</title>
+              <title>{tlLabel(b.ts)} · {t('hoch', 'high')} {b.high} · {t('warnung', 'warning')} {b.warn} · info {b.info}</title>
               <rect {x} y={TL_PAD.t} width={tlStep} height={base - TL_PAD.t} class={selected ? 'fill-ctp-surface0/60' : 'fill-transparent hover:fill-ctp-surface0/40'} />
               <rect {x} y={base - tlY(b.high)} width={w} height={tlY(b.high)} class="fill-ctp-red" />
               <rect {x} y={base - tlY(b.high + b.warn)} width={w} height={tlY(b.warn)} class="fill-ctp-yellow" />
@@ -320,41 +324,41 @@
       </div>
     </Window>
 
-    <Window title="Auffälligkeiten" subtitle="wiederholungen desselben hosts werden zusammengefasst" bodyClass="p-0 overflow-auto max-h-[70vh]">
+    <Window title={t('Auffälligkeiten', 'Anomalies')} subtitle={t('wiederholungen desselben hosts werden zusammengefasst', 'repeats of the same host are merged')} bodyClass="p-0 overflow-auto max-h-[70vh]">
       {#snippet actions()}
         {#if slot}
-          <button class="chip text-ctp-teal" title="auswahl aufheben" onclick={() => (slot = null)}>{fmtDate(slot.from)} – {fmtDate(slot.to + 1)} ✕</button>
+          <button class="chip text-ctp-teal" title={t('auswahl aufheben', 'clear selection')} onclick={() => (slot = null)}>{fmtDate(slot.from)} – {fmtDate(slot.to + 1)} ✕</button>
         {/if}
         <select class="input !w-auto !py-0.5 text-[11px]" bind:value={filter.range}>{#each RANGES as [v, l]}<option value={v}>{l}</option>{/each}</select>
         <select class="input !w-auto !py-0.5 text-[11px]" bind:value={filter.kind}>
-          <option value="">alle arten</option>
+          <option value="">{t('alle arten', 'all kinds')}</option>
           {#each Object.entries(KINDS) as [k, v]}<option value={k}>{v.label}</option>{/each}
         </select>
         <select class="input !w-auto !py-0.5 text-[11px]" bind:value={filter.severity}>
-          <option value="">alle</option>
-          <option value="warn">ab warnung</option>
-          <option value="high">nur hoch</option>
+          <option value="">{t('alle', 'all')}</option>
+          <option value="warn">{t('ab warnung', 'warning and up')}</option>
+          <option value="high">{t('nur hoch', 'high only')}</option>
         </select>
         <div class="relative">
-          <label class="chip cursor-pointer" title="auch auffälligkeiten zeigen, die eine ausnahme ausblendet"
-          ><input type="checkbox" class="accent-ctp-teal" bind:checked={filter.excepted} />ausgenommene</label
+          <label class="chip cursor-pointer" title={t('auch auffälligkeiten zeigen, die eine ausnahme ausblendet', 'also show anomalies hidden by an exception')}
+          ><input type="checkbox" class="accent-ctp-teal" bind:checked={filter.excepted} />{t('ausgenommene', 'excepted')}</label
         >
-        <input class="input !w-40 !py-0.5 !pr-5 text-[11px]" placeholder="host-ip oder teil davon" list="anomaly-hosts" bind:value={filter.host} />
-          {#if filter.host}<button class="absolute right-1.5 top-1/2 -translate-y-1/2 text-ctp-overlay1 hover:text-ctp-text" title="host-filter aufheben" onclick={() => (filter.host = '')}>✕</button>{/if}
+        <input class="input !w-40 !py-0.5 !pr-5 text-[11px]" placeholder={t('host-ip oder teil davon', 'host ip or part of it')} list="anomaly-hosts" bind:value={filter.host} />
+          {#if filter.host}<button class="absolute right-1.5 top-1/2 -translate-y-1/2 text-ctp-overlay1 hover:text-ctp-text" title={t('host-filter aufheben', 'clear host filter')} onclick={() => (filter.host = '')}>✕</button>{/if}
           <datalist id="anomaly-hosts">{#each hosts as h}<option value={h}></option>{/each}</datalist>
         </div>
       {/snippet}
       <table class="table-flows">
         <thead>
           <tr>
-            {#each [['severity', ''], ['ts', 'Beginn'], ['last_ts', 'Zuletzt'], ['kind', 'Art'], ['host', 'Host'], ['group', 'Gruppe']] as [key, label]}
+            {#each [['severity', ''], ['ts', t('Beginn', 'Start')], ['last_ts', t('Zuletzt', 'Last')], ['kind', t('Art', 'Kind')], ['host', 'Host'], ['group', t('Gruppe', 'Group')]] as [key, label]}
               <th>
-                <button class="uppercase tracking-wider hover:text-ctp-text {sort.key === key ? 'text-ctp-teal' : ''}" title="sortieren" onclick={() => sortBy(key)}
+                <button class="uppercase tracking-wider hover:text-ctp-text {sort.key === key ? 'text-ctp-teal' : ''}" title={t('sortieren', 'sort')} onclick={() => sortBy(key)}
                   >{label || '●'}{sort.key === key ? (sort.dir < 0 ? ' ↓' : ' ↑') : ''}</button
                 >
               </th>
             {/each}
-            <th class="w-full">Befund</th>
+            <th class="w-full">{t('Befund', 'Finding')}</th>
           </tr>
         </thead>
         <tbody>
@@ -362,27 +366,27 @@
             {@const kind = KINDS[r.kind] ?? KINDS.stat}
             <tr class="cursor-pointer {r.exception_id ? 'opacity-50' : ''}" onclick={() => (open = open === r.id ? null : r.id)}>
               <td title={SEVERITY[r.severity]?.[1]}><span class="led {SEVERITY[r.severity]?.[0]}"></span></td>
-              <td class="tabular-nums text-ctp-subtext0" title="erstes fenster">{fmtDate(r.ts)}</td>
-              <td class="tabular-nums text-ctp-subtext0" title="letztes fenster">
+              <td class="tabular-nums text-ctp-subtext0" title={t('erstes fenster', 'first window')}>{fmtDate(r.ts)}</td>
+              <td class="tabular-nums text-ctp-subtext0" title={t('letztes fenster', 'last window')}>
                 {#if r.count > 1}{fmtDate(r.last_ts)}<span class="text-ctp-overlay0"> · {r.count}×</span>{:else}<span class="text-ctp-overlay0">–</span>{/if}
               </td>
               <td><span class="chip !py-0 {kind.color}" title={kind.title}>{kind.label}</span></td>
               <td>
-                <button class="text-ctp-teal hover:underline" title="in der flow-suche öffnen" onclick={(e) => (e.stopPropagation(), searchFor({ ip: r.host, ...eventRange(r) }))}>{r.host}</button>
+                <button class="text-ctp-teal hover:underline" title={t('in der flow-suche öffnen', 'open in flow search')} onclick={(e) => (e.stopPropagation(), searchFor({ ip: r.host, ...eventRange(r) }))}>{r.host}</button>
                 <button
                   class="ml-1 text-ctp-overlay0 hover:text-ctp-teal"
-                  title="nur auffälligkeiten dieses hosts zeigen"
+                  title={t('nur auffälligkeiten dieses hosts zeigen', 'show only anomalies of this host')}
                   onclick={(e) => (e.stopPropagation(), (filter.host = filter.host === r.host ? '' : r.host))}>{filter.host === r.host ? '✕' : '⧩'}</button
                 >
               </td>
               <td class="text-ctp-overlay1">{r.group}</td>
               <td class="whitespace-normal text-ctp-text [overflow-wrap:anywhere]">
                 {#if r.kind === 'country'}<span class="mr-1">{flag(r.detail?.cc)}</span>{/if}{#if r.kind === 'beacon'}{r.title}{:else}{@render ipText(r.title, r.geo)}{/if}
-                {#if r.exception_id}<span class="chip ml-1 !py-0 text-ctp-overlay1" title={exceptionById.get(r.exception_id)?.comment}>ausgenommen #{r.exception_id}</span>{/if}
+                {#if r.exception_id}<span class="chip ml-1 !py-0 text-ctp-overlay1" title={exceptionById.get(r.exception_id)?.comment}>{t('ausgenommen', 'excepted')} #{r.exception_id}</span>{/if}
                 {#if r.kind === 'stat' && r.detail?.ml_score != null}
                   <span
                     class="chip ml-1 !py-0 {r.detail.ml_agrees ? 'border-ctp-mauve/60 text-ctp-mauve' : 'text-ctp-overlay0'}"
-                    title="zweite meinung des isolation forest">ml {r.detail.ml_score.toFixed(2)} {r.detail.ml_agrees ? '✓ stimmt zu' : '· unauffällig'}</span
+                    title={t('zweite meinung des isolation forest', 'second opinion of the isolation forest')}>ml {r.detail.ml_score.toFixed(2)} {r.detail.ml_agrees ? t('✓ stimmt zu', '✓ agrees') : t('· unauffällig', '· normal')}</span
                   >
                 {/if}
               </td>
@@ -392,83 +396,83 @@
                 <td></td>
                 <td colspan="6" class="whitespace-normal text-[11px] [overflow-wrap:anywhere] text-ctp-subtext0">
                   {#if r.kind === 'stat'}
-                    <div class="mb-1 text-ctp-overlay1">verglichen mit: {r.detail.slot ?? '–'}</div>
+                    <div class="mb-1 text-ctp-overlay1">{t('verglichen mit', 'compared with')}: {r.detail.slot ?? '–'}</div>
                     <div class="flex flex-wrap gap-2">
                       {#each r.detail.features ?? [] as f}
-                        <span class="chip">{f.name} <span class="text-ctp-text">{fmtValue(f)}</span> · typisch {fmtTypical(f)} · z {f.z}</span>
+                        <span class="chip">{f.name} <span class="text-ctp-text">{fmtValue(f)}</span> · {t('typisch', 'typical')} {fmtTypical(f)} · z {f.z}</span>
                       {/each}
                     </div>
                     {@render hostContext(r.detail.context, r.geo)}
                   {:else if r.kind === 'ml'}
                     <div class="mb-1 text-ctp-overlay1">
-                      ml-score {r.detail.ml_score} – stärkste abweichungen vom median aller hosts{r.detail.slot ? ` · eigenes profil: ${r.detail.slot}` : ''}:
+                      ml-score {r.detail.ml_score} – {t('stärkste abweichungen vom median aller hosts', 'largest deviations from the median of all hosts')}{r.detail.slot ? ` · ${t('eigenes profil', 'own profile')}: ${r.detail.slot}` : ''}:
                     </div>
                     <div class="flex flex-wrap gap-2">
                       {#each r.detail.deviations ?? [] as d}
                         <span class="chip"
-                          >{d.name} <span class="text-ctp-text">{fmtValue(d)}</span> · alle hosts {fmtTypical(d)}{#if d.own_typical != null}
-                            · eigenes profil {fmtTypical({ ...d, typical: d.own_typical })} (z {d.own_z}){/if}</span
+                          >{d.name} <span class="text-ctp-text">{fmtValue(d)}</span> · {t('alle hosts', 'all hosts')} {fmtTypical(d)}{#if d.own_typical != null}
+                            · {t('eigenes profil', 'own profile')} {fmtTypical({ ...d, typical: d.own_typical })} (z {d.own_z}){/if}</span
                         >
                       {:else}
-                        <span class="text-ctp-overlay0">keine einzelne kennzahl sticht heraus – die kombination (auch mit der uhrzeit) ist ungewöhnlich</span>
+                        <span class="text-ctp-overlay0">{t('keine einzelne kennzahl sticht heraus – die kombination (auch mit der uhrzeit) ist ungewöhnlich', 'no single metric stands out – the combination (including the time of day) is unusual')}</span>
                       {/each}
                     </div>
                     {@render hostContext(r.detail.context, r.geo)}
                   {:else if r.kind === 'scan'}
-                    <div>{r.detail.attempts} versuche · {r.detail.hosts} ziel-hosts · {r.detail.ports} ports</div>
+                    <div>{r.detail.attempts} {t('versuche', 'attempts')} · {r.detail.hosts} {t('ziel-hosts', 'target hosts')} · {r.detail.ports} ports</div>
                     <div class="mt-1 text-ctp-overlay1">ports: {(r.detail.sample_ports ?? []).join(', ')}</div>
-                    {@render ipList(r.detail.hosts > (r.detail.sample_hosts?.length ?? 0) ? 'ziele (auszug)' : 'ziele', r.detail.sample_hosts, r.geo)}
+                    {@render ipList(r.detail.hosts > (r.detail.sample_hosts?.length ?? 0) ? t('ziele (auszug)', 'targets (sample)') : t('ziele', 'targets'), r.detail.sample_hosts, r.geo)}
                   {:else if r.kind === 'dns'}
                     <div class="flex flex-wrap gap-2">
                       {#each r.detail.resolvers ?? [] as res}<span class="chip">{@render ipText(res.ip, r.geo)} · {res.flows} flows</span>{/each}
                     </div>
-                    <div class="mt-1 text-ctp-overlay0">erlaubte externe resolver: [anomaly] dns_servers</div>
+                    <div class="mt-1 text-ctp-overlay0">{t('erlaubte externe resolver', 'allowed external resolvers')}: [anomaly] dns_servers</div>
                   {:else if r.kind === 'policy'}
-                    <div>regel <span class="text-ctp-text">{r.detail.rule}</span> ({r.detail.from} → {r.detail.to}) · {r.detail.flows} verbindungen · {fmtBytes(r.detail.bytes)}</div>
+                    <div>{t('regel', 'rule')} <span class="text-ctp-text">{r.detail.rule}</span> ({r.detail.from} → {r.detail.to}) · {r.detail.flows} {t('verbindungen', 'connections')} · {fmtBytes(r.detail.bytes)}</div>
                     {#if r.detail.ports?.length}<div class="mt-1 text-ctp-overlay1">ports: {r.detail.ports.join(', ')}</div>{/if}
-                    {@render ipList(r.detail.peers > (r.detail.sample_peers?.length ?? 0) ? 'ziele (auszug)' : 'ziele', r.detail.sample_peers, r.geo)}
+                    {@render ipList(r.detail.peers > (r.detail.sample_peers?.length ?? 0) ? t('ziele (auszug)', 'destinations (sample)') : t('ziele', 'destinations'), r.detail.sample_peers, r.geo)}
                   {:else if r.kind === 'beacon'}
                     <div>
-                      ziel <span class="text-ctp-text">{r.detail.peer}:{r.detail.port}/{r.detail.proto}</span>
+                      {t('ziel', 'destination')} <span class="text-ctp-text">{r.detail.peer}:{r.detail.port}/{r.detail.proto}</span>
                       {#if r.detail.cc}<span class="ml-1">{flag(r.detail.cc)} {r.detail.cc}</span>{/if}
                       {#if r.detail.org}<span class="text-ctp-overlay1"> · {r.detail.org}{r.detail.asn ? ` (AS${r.detail.asn})` : ''}</span>{/if}
                     </div>
                     <div class="mt-1 flex flex-wrap gap-2">
-                      <span class="chip">{r.detail.connections} verbindungen</span>
-                      <span class="chip">alle {fmtInterval(r.detail.interval_s)} ± {Math.round(r.detail.jitter * 100)} %</span>
-                      <span class="chip">je ~{fmtBytes(r.detail.median_bytes)}</span>
+                      <span class="chip">{r.detail.connections} {t('verbindungen', 'connections')}</span>
+                      <span class="chip">{t('alle', 'every')} {fmtInterval(r.detail.interval_s)} ± {Math.round(r.detail.jitter * 100)} %</span>
+                      <span class="chip">{t('je', 'each')} ~{fmtBytes(r.detail.median_bytes)}</span>
                       <span class="chip">{fmtDate(r.detail.first_ms)} – {fmtDate(r.detail.last_ms)}</span>
                       {#if r.detail.fleet_hosts > 1}
-                        <span class="chip">{r.detail.fleet_hosts} hosts mit gleichem muster zu {r.detail.asn ? `AS${r.detail.asn}` : 'diesem netz'}</span>
+                        <span class="chip">{r.detail.fleet_hosts} {t('hosts mit gleichem muster zu', 'hosts with the same pattern to')} {r.detail.asn ? `AS${r.detail.asn}` : t('diesem netz', 'this network')}</span>
                       {/if}
                     </div>
-                    <div class="mt-1 text-ctp-overlay0">nur ein hinweis: auch updates, push-dienste oder geräte, die ihren status melden, verbinden sich regelmäßig</div>
+                    <div class="mt-1 text-ctp-overlay0">{t('nur ein hinweis: auch updates, push-dienste oder geräte, die ihren status melden, verbinden sich regelmäßig', 'just a hint: updates, push services or devices reporting their status also connect regularly')}</div>
                   {:else if r.kind === 'drift'}
-                    <div class="mb-1 text-ctp-overlay1">verglichen mit: {r.detail.slot ?? '–'}</div>
+                    <div class="mb-1 text-ctp-overlay1">{t('verglichen mit', 'compared with')}: {r.detail.slot ?? '–'}</div>
                     <div class="flex flex-wrap gap-2">
-                      <span class="chip">{r.detail.name} <span class="text-ctp-text">{fmtBytes(r.detail.value)}</span> · typisch {fmtBytes(r.detail.typical)}</span>
-                      <span class="chip">{fmtBytes(r.detail.excess)} mehr als typisch</span>
-                      <span class="chip">seit {fmtDate(r.detail.since_ms)} · {r.detail.windows} fenster</span>
-                      <span class="chip" title="summe aus min(z, z_threshold) − k je fenster, gemeldet ab h">cusum {r.detail.cusum} (k {r.detail.k}, h {r.detail.h})</span>
+                      <span class="chip">{r.detail.name} <span class="text-ctp-text">{fmtBytes(r.detail.value)}</span> · {t('typisch', 'typical')} {fmtBytes(r.detail.typical)}</span>
+                      <span class="chip">{fmtBytes(r.detail.excess)} {t('mehr als typisch', 'more than typical')}</span>
+                      <span class="chip">{t('seit', 'since')} {fmtDate(r.detail.since_ms)} · {r.detail.windows} {t('fenster', 'windows')}</span>
+                      <span class="chip" title={t('summe aus min(z, z_threshold) − k je fenster, gemeldet ab h', 'sum of min(z, z_threshold) − k per window, reported from h')}>cusum {r.detail.cusum} (k {r.detail.k}, h {r.detail.h})</span>
                     </div>
-                    <div class="mt-1 text-ctp-overlay0">in keinem einzelnen fenster auffällig, aber über längere zeit dauerhaft leicht erhöht – auch ein neuer cloud-sync kann so aussehen</div>
+                    <div class="mt-1 text-ctp-overlay0">{t('in keinem einzelnen fenster auffällig, aber über längere zeit dauerhaft leicht erhöht – auch ein neuer cloud-sync kann so aussehen', 'not unusual in any single window, but slightly raised for a long time – a new cloud sync can look like this too')}</div>
                     {@render hostContext(r.detail.context, r.geo)}
                   {:else if r.kind === 'country'}
-                    <div>{flag(r.detail.cc)} {r.detail.cc} · {fmtBytes(r.detail.bytes)} hochgeladen im ersten fenster</div>
+                    <div>{flag(r.detail.cc)} {r.detail.cc} · {fmtBytes(r.detail.bytes)} {t('hochgeladen im ersten fenster', 'uploaded in the first window')}</div>
                     {#if r.detail.peers?.length}
-                      <div class="mt-1 text-ctp-overlay1">ziele in {r.detail.cc}{r.detail.peer_count > r.detail.peers.length ? ` (${r.detail.peers.length} von ${r.detail.peer_count})` : ''}:</div>
+                      <div class="mt-1 text-ctp-overlay1">{t('ziele in', 'destinations in')} {r.detail.cc}{r.detail.peer_count > r.detail.peers.length ? ` (${r.detail.peers.length} ${t('von', 'of')} ${r.detail.peer_count})` : ''}:</div>
                       {@render peerList(r.detail.peers, r.geo, r.detail.from_ms)}
                     {:else}
-                      <div class="mt-1 text-ctp-overlay0">ziel-ips wurden für diese ältere meldung nicht gespeichert</div>
+                      <div class="mt-1 text-ctp-overlay0">{t('ziel-ips wurden für diese ältere meldung nicht gespeichert', 'destination ips were not stored for this older report')}</div>
                     {/if}
                   {/if}
                   <div class="mt-2 flex flex-wrap items-center gap-3 text-ctp-overlay0">
-                    <span>zuletzt {fmtDate(r.last_ts)} · klick auf eine ip öffnet die flow-suche für diesen zeitraum</span>
+                    <span>{t('zuletzt', 'last')} {fmtDate(r.last_ts)} · {t('klick auf eine ip öffnet die flow-suche für diesen zeitraum', 'click an ip to open the flow search for this period')}</span>
                     {#if r.exception_id && exceptionById.has(r.exception_id)}
-                      <button class="chip hover:text-ctp-text" onclick={() => editException(exceptionById.get(r.exception_id))}>ausnahme #{r.exception_id} bearbeiten…</button>
+                      <button class="chip hover:text-ctp-text" onclick={() => editException(exceptionById.get(r.exception_id))}>{t(`ausnahme #${r.exception_id} bearbeiten…`, `edit exception #${r.exception_id}…`)}</button>
                     {:else}
-                      <button class="chip hover:text-ctp-text" title="solche auffälligkeiten künftig ausblenden und nicht mailen" onclick={() => exceptionFor(r)}
-                        >ausnahme anlegen…</button
+                      <button class="chip hover:text-ctp-text" title={t('solche auffälligkeiten künftig ausblenden und nicht mailen', 'hide such anomalies from now on and do not mail them')} onclick={() => exceptionFor(r)}
+                        >{t('ausnahme anlegen…', 'create exception…')}</button
                       >
                     {/if}
                   </div>
@@ -478,7 +482,11 @@
           {:else}
             <tr>
               <td colspan="7" class="py-12 text-center text-ctp-overlay0">
-                {slot ? 'keine auffälligkeiten in diesem abschnitt' : status?.learning ? 'keine auffälligkeiten – die erkennung lernt noch' : 'keine auffälligkeiten im gewählten zeitraum'}
+                {slot
+                  ? t('keine auffälligkeiten in diesem abschnitt', 'no anomalies in this section')
+                  : status?.learning
+                    ? t('keine auffälligkeiten – die erkennung lernt noch', 'no anomalies – the detection is still learning')
+                    : t('keine auffälligkeiten im gewählten zeitraum', 'no anomalies in the selected period')}
               </td>
             </tr>
           {/each}

@@ -41,17 +41,17 @@ pub async fn upload(State(s): State<AppState>, Query(p): Query<UploadParams>, bo
     let mut size: u64 = 0;
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("Upload abgebrochen: {e}")))?;
+        let chunk = chunk.map_err(|e| ApiError(StatusCode::BAD_REQUEST, model::trf!("Upload abgebrochen: {e}", "upload aborted: {e}")))?;
         size += chunk.len() as u64;
         if size > s.pcap.max_upload_bytes {
-            return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, format!("Datei größer als {} MiB", s.pcap.max_upload_bytes / 1024 / 1024)));
+            return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, model::trf!("Datei größer als {} MiB", "file larger than {} MiB", s.pcap.max_upload_bytes / 1024 / 1024)));
         }
         file.write_all(&chunk).await.map_err(internal)?;
     }
     file.flush().await.map_err(internal)?;
     drop(file);
     if size == 0 {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "leere Datei".into()));
+        return Err(ApiError(StatusCode::BAD_REQUEST, model::tr("leere Datei", "empty file").into()));
     }
 
     let (geo, apps, path, fname) = (s.geo.clone(), s.pcap.apps.clone(), temp.0.clone(), name.clone());
@@ -85,7 +85,7 @@ pub async fn list(State(s): State<AppState>, Query(p): Query<ListParams>) -> Api
 
 /// Gespeichertes Ergebnis unverändert als JSON ausliefern (wird nicht neu serialisiert).
 pub async fn get(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Response, ApiError> {
-    let json = s.db.get_pcap(id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Analyse nicht gefunden".into()))?;
+    let json = s.db.get_pcap(id).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, model::tr("Analyse nicht gefunden", "analysis not found").into()))?;
     Ok(([(header::CONTENT_TYPE, "application/json")], json).into_response())
 }
 
@@ -93,7 +93,7 @@ pub async fn delete(State(s): State<AppState>, Path(id): Path<i64>) -> Result<St
     if s.db.delete_pcap(id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError(StatusCode::NOT_FOUND, "Analyse nicht gefunden".into()))
+        Err(ApiError(StatusCode::NOT_FOUND, model::tr("Analyse nicht gefunden", "analysis not found").into()))
     }
 }
 

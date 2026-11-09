@@ -2,6 +2,7 @@
   import { ui, WINDOWS } from '../lib/state.svelte.js';
   import { live } from '../lib/live.svelte.js';
   import { fmtBits, fmtNum, DIRECTIONS } from '../lib/format.js';
+  import { i18n, t, locale, setLang } from '../lib/i18n.svelte.js';
 
   let { status } = $props();
   let clock = $state(new Date());
@@ -10,13 +11,13 @@
     return () => clearInterval(id);
   });
 
-  const workspaces = [
+  const workspaces = $derived([
     { key: 'dashboard', n: 1, label: 'dashboard' },
     { key: 'flows', n: 2, label: 'flows' },
     { key: 'pcap', n: 3, label: 'pcap' },
-    { key: 'archive', n: 4, label: 'archiv' },
-    { key: 'anomalies', n: 5, label: 'anomalien' },
-  ];
+    { key: 'archive', n: 4, label: t('archiv', 'archive') },
+    { key: 'anomalies', n: 5, label: t('anomalien', 'anomalies') },
+  ]);
 
   // Auffälligkeiten der letzten 24 h als Zähler am Workspace (rot bei "hoch", gelb bei Warnungen)
   const alerts = $derived(status?.anomalies_24h);
@@ -45,14 +46,14 @@
         {#if ws.key === 'anomalies' && alertCount > 0}
           <span
             class="ml-0.5 rounded px-1 text-[10px] {alerts.high > 0 ? 'bg-ctp-red/20 text-ctp-red' : 'bg-ctp-yellow/20 text-ctp-yellow'}"
-            title="{alerts.high} hoch, {alerts.warn} warnung in den letzten 24 h">{alertCount}</span
+            title={t(`${alerts.high} hoch, ${alerts.warn} warnung in den letzten 24 h`, `${alerts.high} high, ${alerts.warn} warning in the last 24 h`)}>{alertCount}</span
           >
         {/if}
       </button>
     {/each}
   </div>
 
-  <div class="mx-auto flex items-center gap-1 rounded-lg bg-ctp-mantle/60 p-1" title="Zeitfenster für Statistiken">
+  <div class="mx-auto flex items-center gap-1 rounded-lg bg-ctp-mantle/60 p-1" title={t('Zeitfenster für Statistiken', 'Time window for statistics')}>
     {#each WINDOWS as w}
       <button
         class="rounded-md px-2 py-0.5 transition {ui.window === w.key ? 'bg-ctp-mauve/20 text-ctp-mauve' : 'text-ctp-overlay1 hover:text-ctp-text'}"
@@ -62,19 +63,22 @@
   </div>
 
   <div class="flex flex-wrap items-center gap-2">
-    <span class="chip" title="WebSocket-Live-Stream">
+    <span class="chip" title={t('WebSocket-Live-Stream', 'WebSocket live stream')}>
       <span class="led {live.connected ? 'animate-pulse-dot bg-ctp-green' : 'bg-ctp-red'}"></span>
       {live.connected ? 'live' : 'offline'}
     </span>
-    <span class="chip" title="Download (letzte Sekunde)"><span style="color: {DIRECTIONS.in.color}">↓</span>{fmtBits((live.current.bytes_in ?? 0) * 8)}</span>
-    <span class="chip" title="Upload (letzte Sekunde)"><span style="color: {DIRECTIONS.out.color}">↑</span>{fmtBits((live.current.bytes_out ?? 0) * 8)}</span>
-    <span class="chip" title="Flows pro Sekunde"><span class="text-ctp-mauve">≋</span>{fmtNum(live.current.flows)}/s</span>
-    <span class="chip {drops > 0 ? '!border-ctp-red/60 text-ctp-red' : ''}" title="Verworfene Flows + Parse-Fehler seit Start">
+    <span class="chip" title={t('Download (letzte Sekunde)', 'Download (last second)')}><span style="color: {DIRECTIONS.in.color}">↓</span>{fmtBits((live.current.bytes_in ?? 0) * 8)}</span>
+    <span class="chip" title={t('Upload (letzte Sekunde)', 'Upload (last second)')}><span style="color: {DIRECTIONS.out.color}">↑</span>{fmtBits((live.current.bytes_out ?? 0) * 8)}</span>
+    <span class="chip" title={t('Flows pro Sekunde', 'Flows per second')}><span class="text-ctp-mauve">≋</span>{fmtNum(live.current.flows)}/s</span>
+    <span class="chip {drops > 0 ? '!border-ctp-red/60 text-ctp-red' : ''}" title={t('Verworfene Flows + Parse-Fehler seit Start', 'Dropped flows + parse errors since start')}>
       <span class="led {drops > 0 ? 'bg-ctp-red' : 'bg-ctp-green'}"></span>drop {fmtNum(drops)}
     </span>
-    <span class="chip" title="Flows in der Live-Datenbank / Live-Fenster">
+    <span class="chip" title={t('Flows in der Live-Datenbank / Live-Fenster', 'Flows in the live database / live window')}>
       <span class="text-ctp-sapphire">◫</span>{fmtNum(status?.db?.rows ?? 0)} · {status?.retention_hours ?? 48}h
     </span>
-    <span class="chip text-ctp-text">{clock.toLocaleTimeString('de-AT', { hour12: false })}</span>
+    <button class="chip hover:text-ctp-teal" title={t('Sprache: English', 'Language: Deutsch')} onclick={() => setLang(i18n.lang === 'de' ? 'en' : 'de')}>
+      <span class={i18n.lang === 'de' ? 'text-ctp-teal' : 'text-ctp-overlay0'}>de</span><span class="text-ctp-overlay0">/</span><span class={i18n.lang === 'en' ? 'text-ctp-teal' : 'text-ctp-overlay0'}>en</span>
+    </button>
+    <span class="chip text-ctp-text">{clock.toLocaleTimeString(locale(), { hour12: false })}</span>
   </div>
 </nav>

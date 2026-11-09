@@ -126,7 +126,7 @@ impl History {
 
     /// Aktuelle Historie für Abfragen.
     pub fn current(&self) -> Result<Database> {
-        self.inner.current.read().expect("Historie-Lock").clone().ok_or_else(|| DbError::Unavailable("Historie wird gerade rotiert – bitte gleich noch einmal".into()))
+        self.inner.current.read().expect("Historie-Lock").clone().ok_or_else(|| DbError::Unavailable(model::tr("Historie wird gerade rotiert – bitte gleich noch einmal", "history is being rotated – please try again in a moment").into()))
     }
 
     /// Aggregate und Stundendateien der Live-Datenbank vor `cutoff` (Stundenbeginn) übernehmen (blockierend).
@@ -341,7 +341,7 @@ impl History {
     pub fn open_archive(&self, name: &str) -> Result<&'static str> {
         let config = &self.inner.config;
         if parse_archive_name(name).is_none() || !config.archive_dir.join(name).is_dir() {
-            return Err(DbError::InvalidFilter(format!("unbekanntes Archiv: {name}")));
+            return Err(DbError::InvalidFilter(model::trf!("unbekanntes Archiv: {name}", "unknown archive: {name}")));
         }
         let mut view = self.inner.view.lock().expect("View-Lock");
         match view.as_mut() {
@@ -350,7 +350,7 @@ impl History {
                 return Ok(if matches!(v.state, ViewState::Ready(_)) { "ready" } else { "unpacking" });
             }
             Some(v) if matches!(v.state, ViewState::Unpacking) => {
-                return Err(DbError::Unavailable(format!("{} wird gerade entpackt – bitte warten", v.name)));
+                return Err(DbError::Unavailable(model::trf!("{} wird gerade entpackt – bitte warten", "{} is being unpacked – please wait", v.name)));
             }
             _ => {}
         }

@@ -1,0 +1,10 @@
+target
+data
+config.toml
+frontend/node_modules
+frontend/dist
+.git
+.idea
+*.pcap
+*.pdf
+docs

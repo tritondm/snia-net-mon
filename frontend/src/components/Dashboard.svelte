@@ -11,6 +11,7 @@
   import { api } from '../lib/api.js';
   import { ui, windowMs, searchFor } from '../lib/state.svelte.js';
   import { fmtBytes, fmtBits, fmtTime, serviceName, isPrivate, flag, geoTitle, DIRECTIONS } from '../lib/format.js';
+  import { t, locale } from '../lib/i18n.svelte.js';
 
   let talkers = $state([]);
   let ports = $state([]);
@@ -67,16 +68,16 @@
   const span = $derived(ui.range ? `${fmtTime(ui.range.from)}–${fmtTime(ui.range.to)}` : ui.window);
 
   const talkerItems = $derived(
-    talkers.map((t) => ({
-      key: t.ip,
-      label: t.ip,
-      sub: isPrivate(t.ip) ? 'intern' : t.geo ? `${flag(t.geo.cc)} ${t.geo.cc ?? ''} ${t.geo.org ?? ''}` : '',
-      title: geoTitle(t.geo),
-      value: t.bytes,
-      display: `${fmtBytes(t.bytes)} · ø ${fmtBits(t.bps)}`,
-      color: isPrivate(t.ip) ? '#74c7ec' : '#94e2d5',
-      color2: isPrivate(t.ip) ? '#89b4fa' : '#a6e3a1',
-      onclick: () => searchFor({ ip: t.ip }),
+    talkers.map((tk) => ({
+      key: tk.ip,
+      label: tk.ip,
+      sub: isPrivate(tk.ip) ? t('intern', 'internal') : tk.geo ? `${flag(tk.geo.cc)} ${tk.geo.cc ?? ''} ${tk.geo.org ?? ''}` : '',
+      title: geoTitle(tk.geo),
+      value: tk.bytes,
+      display: `${fmtBytes(tk.bytes)} · ø ${fmtBits(tk.bps)}`,
+      color: isPrivate(tk.ip) ? '#74c7ec' : '#94e2d5',
+      color2: isPrivate(tk.ip) ? '#89b4fa' : '#a6e3a1',
+      onclick: () => searchFor({ ip: tk.ip }),
     })),
   );
   const portItems = $derived(
@@ -113,20 +114,24 @@
       color2: '#b4befe',
     })),
   );
-  const geoEmpty = $derived(geoStats.enabled ? 'keine externen Gegenstellen im Zeitfenster' : 'GeoIP aus – GeoLite2-Datenbanken fehlen (siehe README)');
+  const geoEmpty = $derived(
+    geoStats.enabled
+      ? t('keine externen Gegenstellen im Zeitfenster', 'no external peers in the time window')
+      : t('GeoIP aus – GeoLite2-Datenbanken fehlen (siehe README)', 'GeoIP off – GeoLite2 databases missing (see README)'),
+  );
 </script>
 
 <div class="grid gap-2.5">
   <StatTiles />
   {#if error}
-    <div class="window border-ctp-red/50 px-4 py-2 text-ctp-red">API-Fehler: {error}</div>
+    <div class="window border-ctp-red/50 px-4 py-2 text-ctp-red">{t('API-Fehler', 'API error')}: {error}</div>
   {/if}
 
   <div class="grid gap-2.5 xl:grid-cols-3">
-    <Window title="Durchsatz" subtitle={ui.range ? 'angehalten · klick oder esc = live' : 'live · 5 min · bereich markieren filtert verbindungen und statistiken'} class="xl:col-span-2" bodyClass="p-3">
+    <Window title={t('Durchsatz', 'Throughput')} subtitle={ui.range ? t('angehalten · klick oder esc = live', 'paused · click or esc = live') : t('live · 5 min · bereich markieren filtert verbindungen und statistiken', 'live · 5 min · select a range to filter connections and statistics')} class="xl:col-span-2" bodyClass="p-3">
       <BandwidthChart />
     </Window>
-    <Window title="Verkehrsrichtung" subtitle={span}>
+    <Window title={t('Verkehrsrichtung', 'Traffic direction')} subtitle={span}>
       {#snippet actions()}
         <DirectionFilter bind:value={ui.dir} compact />
       {/snippet}
@@ -135,14 +140,14 @@
   </div>
 
   <div class="grid gap-2.5 xl:grid-cols-3">
-    <Window title="Aktive Verbindungen" subtitle={ui.range ? 'zeitbereich' : 'live'} class="h-[560px] xl:col-span-2 xl:h-0 xl:min-h-full" bodyClass="p-0">
+    <Window title={t('Aktive Verbindungen', 'Active connections')} subtitle={ui.range ? t('zeitbereich', 'time range') : 'live'} class="h-[560px] xl:col-span-2 xl:h-0 xl:min-h-full" bodyClass="p-0">
       <LiveTable />
     </Window>
     <div class="grid gap-2.5">
-      <Window title="Protokolle" subtitle="{span}{dirLabel}">
+      <Window title={t('Protokolle', 'Protocols')} subtitle="{span}{dirLabel}">
         <ProtocolDonut {protocols} />
       </Window>
-      <Window title="Top Talker" subtitle="{span}{dirLabel} · bytes je ip" bodyClass="p-2">
+      <Window title="Top Talker" subtitle="{span}{dirLabel} · {t('bytes je ip', 'bytes per ip')}" bodyClass="p-2">
         <BarList items={talkerItems} />
       </Window>
       <Window title="Top Ports" subtitle="{span}{dirLabel}" bodyClass="p-2">
@@ -152,24 +157,24 @@
   </div>
 
   <div class="grid gap-2.5 xl:grid-cols-2">
-    <Window title="Länder" subtitle="{span}{dirLabel} · externe gegenstellen (geoip)" bodyClass="p-2">
+    <Window title={t('Länder', 'Countries')} subtitle="{span}{dirLabel} · {t('externe gegenstellen (geoip)', 'external peers (geoip)')}" bodyClass="p-2">
       <BarList items={countryItems} empty={geoEmpty} />
       {#if geoStats.unknown_bytes > 0}
-        <div class="px-2 pt-1 text-[11px] text-ctp-overlay0">ohne zuordnung: {fmtBytes(geoStats.unknown_bytes)}</div>
+        <div class="px-2 pt-1 text-[11px] text-ctp-overlay0">{t('ohne zuordnung', 'unassigned')}: {fmtBytes(geoStats.unknown_bytes)}</div>
       {/if}
     </Window>
-    <Window title="Netze" subtitle="{span}{dirLabel} · autonome systeme (asn)" bodyClass="p-2">
+    <Window title={t('Netze', 'Networks')} subtitle="{span}{dirLabel} · {t('autonome systeme (asn)', 'autonomous systems (asn)')}" bodyClass="p-2">
       <BarList items={asnItems} empty={geoEmpty} />
     </Window>
   </div>
 
-  <Window title="Flow-Diagramm" subtitle="quelle → dienst → ziel · {span}{dirLabel}">
+  <Window title={t('Flow-Diagramm', 'Flow diagram')} subtitle="{t('quelle → dienst → ziel', 'source → service → destination')} · {span}{dirLabel}">
     {#snippet actions()}
-      <span class="text-ctp-overlay0">verbindungen</span>
+      <span class="text-ctp-overlay0">{t('verbindungen', 'connections')}</span>
       {#each [15, 25, 50] as n}
         <button class="chip !py-0 {sankeyLimit === n ? '!border-ctp-mauve/60 text-ctp-mauve' : ''}" onclick={() => (sankeyLimit = n)}>{n}</button>
       {/each}
-      {#if updated}<span class="text-ctp-overlay0">· {updated.toLocaleTimeString('de-AT')}</span>{/if}
+      {#if updated}<span class="text-ctp-overlay0">· {updated.toLocaleTimeString(locale())}</span>{/if}
     {/snippet}
     <SankeyChart {graph} />
   </Window>

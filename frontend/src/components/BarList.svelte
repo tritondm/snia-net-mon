@@ -1,6 +1,7 @@
 <script>
   // Horizontale Balkenliste (Top Talker, Top Ports). items: [{ key, label, sub, value, display, color, onclick }]
-  let { items = [], empty = 'keine Daten im Zeitfenster' } = $props();
+  import { t } from '../lib/i18n.svelte.js';
+  let { items = [], empty } = $props();
   const max = $derived(Math.max(1, ...items.map((i) => i.value)));
 </script>
 
@@ -20,6 +21,6 @@
       </button>
     </li>
   {:else}
-    <li class="py-6 text-center text-ctp-overlay0">{empty}</li>
+    <li class="py-6 text-center text-ctp-overlay0">{empty ?? t('keine Daten im Zeitfenster', 'no data in the time window')}</li>
   {/each}
 </ul>

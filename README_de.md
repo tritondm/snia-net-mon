@@ -16,6 +16,8 @@ IPFIX-Export.
 
 - **Backend:** Rust (Tokio, Axum), SQLite im WAL-Modus, eine Datei pro Stunde
 - **Frontend:** Svelte 5 + Tailwind, Catppuccin-Mocha-Theme im Hyprland-Look (Frosted Glass, Verlaufskanten, Monospace)
+- **Sprache:** Web-UI auf Deutsch und Englisch (Umschalter oben rechts); Befunde, Fehlermeldungen und Mails folgen
+  `server.language` bzw. `SNIA_LANGUAGE`
 - **Status:** Prototyp – funktionsfähig und getestet, siehe [Grenzen & nächste Schritte](FEATURES_de.md#grenzen--nächste-schritte)
 
 ![Dashboard mit Live-Durchsatz, aktiven Verbindungen samt GeoIP, Verkehrsrichtung, Protokollen und Top Talkern; oben die fünf Workspaces](docs/screenshot.png)
@@ -44,10 +46,16 @@ IPFIX-Export.
 
 | Datei | Inhalt |
 |---|---|
-| [INSTALL_de.md](INSTALL_de.md) | Voraussetzungen, Schnellstart mit Demo-Verkehr, GeoIP-Datenbanken, Flow-Export am Exporter einrichten, Konfiguration, Sicherheit, Entwicklung |
+| [INSTALL_de.md](INSTALL_de.md) | Voraussetzungen, Docker, Schnellstart mit Demo-Verkehr, GeoIP-Datenbanken, Flow-Export am Exporter einrichten, Konfiguration, Sicherheit, Entwicklung |
 | [FEATURES_de.md](FEATURES_de.md) | Alle Funktionen im Detail: Verkehrsrichtung, Upload-Alarm, **Anomalie-Erkennung samt Mathematik**, Netz-Regeln, Architektur, Speicher und Aufbewahrung, Leistung, API, Grenzen |
 
-Kurz ausprobieren, ganz ohne Firewall (Rust ≥ 1.88, Node ≥ 20):
+Kurz ausprobieren, ganz ohne Firewall, mit Docker:
+
+```bash
+docker compose --profile demo up -d             # Web-UI: http://127.0.0.1:8080, mit Demo-Verkehr
+```
+
+Oder aus den Quellen (Rust ≥ 1.88, Node ≥ 20):
 
 ```bash
 cd frontend && npm install && npm run build && cd ..

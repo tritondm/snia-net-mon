@@ -169,8 +169,14 @@ pub fn render(alert: &UploadAlert, threshold: u64, geo: &GeoLookup) -> (String, 
         6 | 17 | 132 => format!("{}/{}", proto_name(k.proto), k.dst_port),
         _ => proto_name(k.proto).to_string(),
     };
-    let subject = format!("[snia-net-mon] Upload {} von {} nach {}{peer_suffix}", fmt_bytes(alert.bytes), k.src_ip, k.dst_ip);
-    let body = format!(
+    let subject = model::trf!(
+        "[snia-net-mon] Upload {} von {} nach {}{peer_suffix}",
+        "[snia-net-mon] Upload {} from {} to {}{peer_suffix}",
+        fmt_bytes(alert.bytes),
+        k.src_ip,
+        k.dst_ip
+    );
+    let body = model::trf!(
         "Eine einzelne Verbindung hat mehr als {threshold} nach extern hochgeladen.\n\
          \n\
          Quelle (intern):  {src}:{sport}\n\
@@ -184,6 +190,19 @@ pub fn render(alert: &UploadAlert, threshold: u64, geo: &GeoLookup) -> (String, 
          \n\
          Die Verbindung läuft eventuell noch weiter; sie wird nur einmal gemeldet.\n\
          Details in der Web-UI unter Flows, Suche nach {src}.\n",
+        "A single connection uploaded more than {threshold} to the outside.\n\
+         \n\
+         Source (internal): {src}:{sport}\n\
+         Destination:       {dst}:{dport}{peer_suffix}\n\
+         Service:           {service}\n\
+         Uploaded:          {bytes} ({raw} bytes, {packets} packets, {flows} flows)\n\
+         Start:             {first}\n\
+         Last seen:         {last}\n\
+         Duration:          {duration}\n\
+         Avg rate:          {rate}\n\
+         \n\
+         The connection may still be running; it is reported only once.\n\
+         Details in the web UI under flows, search for {src}.\n",
         threshold = fmt_bytes(threshold),
         src = k.src_ip,
         sport = k.src_port,
