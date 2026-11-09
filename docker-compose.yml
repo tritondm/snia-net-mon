@@ -2,15 +2,16 @@
 #
 #   docker compose up -d                       # Monitor starten, Web-UI: http://127.0.0.1:8080
 #   docker compose --profile demo up -d        # zusätzlich Demo-Verkehr (flowgen), ganz ohne Firewall
+#   docker compose pull                        # auf die neueste Version aktualisieren
+#
+# Das Image kommt fertig von GitHub (amd64 und arm64). Selbst aus den Quellen bauen:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml --profile demo up -d --build
 #
 # Danach am Exporter (Firewall, Router, softflowd …) NetFlow v9 oder IPFIX an <Docker-Host>:2055/udp schicken.
 
 services:
   snia-net-mon:
-    build: .
-    image: snia-net-mon:latest
-    # Statt selbst zu bauen das fertige Image von GitHub nehmen (amd64 und arm64):
-    #   image: ghcr.io/<github-user>/snia-net-mon:latest   und die Zeilen "build: ." entfernen
+    image: ghcr.io/tritondm/snia-net-mon:latest
     restart: unless-stopped
     ports:
       # Web-UI nur lokal. Für den Zugriff aus dem Netz "8080:8080" schreiben UND SNIA_API_TOKEN setzen.
@@ -32,8 +33,7 @@ services:
 
   # Demo-Verkehr: synthetische NetFlow-v9-Pakete an den Collector
   flowgen:
-    build: .
-    image: snia-net-mon:latest
+    image: ghcr.io/tritondm/snia-net-mon:latest
     profiles: [demo]
     restart: unless-stopped
     depends_on: [snia-net-mon]

@@ -1,0 +1,8 @@
+# Image selbst aus den Quellen bauen statt es von GitHub zu laden:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml --profile demo up -d --build
+
+services:
+  snia-net-mon:
+    build: .
+  flowgen:
+    build: .

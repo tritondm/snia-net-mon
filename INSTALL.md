@@ -25,12 +25,15 @@ How to build and start Snia-Net-Mon and connect it to an exporter. What the indi
 
 ## Docker
 
-No Rust or Node needed – the image builds the frontend and backend itself:
+No Rust or Node needed – the ready-made image (amd64, arm64) comes from `ghcr.io/tritondm/snia-net-mon`:
 
 ```bash
 docker compose up -d                        # web UI: http://127.0.0.1:8080, collector: UDP 2055
 docker compose --profile demo up -d         # additionally demo traffic from flowgen
+docker compose pull && docker compose up -d # update
 ```
+
+To build the image from source instead: `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
 
 Settings via environment variables (e.g. in a `.env` file next to `docker-compose.yml`):
 
