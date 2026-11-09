@@ -259,7 +259,9 @@ struct Service {
 const SERVICES: &[Service] = &[
     Service { port: 443, proto: 6, servers: &["142.250.185.78", "151.101.1.140", "104.16.132.229", "13.107.42.14", "2a00:1450:4001:82b::200e", "2606:4700::6810:84e5"], weight: 40, max_bytes: 400_000_000 },
     Service { port: 443, proto: 17, servers: &["142.250.185.78", "157.240.17.35", "2a03:2880:f12d:83:face:b00c:0:25de"], weight: 12, max_bytes: 200_000_000 },
-    Service { port: 53, proto: 17, servers: &["1.1.1.1", "9.9.9.9", "2606:4700:4700::1111"], weight: 20, max_bytes: 2_000 },
+    // DNS über den eigenen Resolver (Router) – nur ein Client fragt direkt extern (siehe ROGUE_DNS_CLIENT)
+    Service { port: 53, proto: 17, servers: &["192.168.1.1", "fd12:3456:789a:1::1"], weight: 19, max_bytes: 2_000 },
+    Service { port: 53, proto: 17, servers: &["1.1.1.1"], weight: 1, max_bytes: 2_000 },
     Service { port: 80, proto: 6, servers: &["93.184.215.14", "199.232.82.132"], weight: 5, max_bytes: 30_000_000 },
     Service { port: 123, proto: 17, servers: &["162.159.200.1", "91.189.94.4"], weight: 3, max_bytes: 400 },
     Service { port: 22, proto: 6, servers: &["140.82.121.4", "192.168.10.5"], weight: 3, max_bytes: 50_000_000 },
@@ -269,6 +271,10 @@ const SERVICES: &[Service] = &[
     Service { port: 3478, proto: 17, servers: &["74.125.250.129"], weight: 3, max_bytes: 60_000_000 },
     Service { port: 0, proto: 1, servers: &["8.8.8.8", "192.168.10.1"], weight: 2, max_bytes: 2_000 },
 ];
+
+/// Der einzige Client, der DNS am eigenen Resolver vorbei direkt an 1.1.1.1 schickt – damit die Demo genau eine
+/// "externes DNS"-Auffälligkeit zeigt statt einer pro Host.
+const ROGUE_DNS_CLIENT: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 37);
 
 /// Erzeugt plausiblen Firewall-Verkehr: einige LAN-Clients (einzelne davon "Vielnutzer"), typische Internetdienste,
 /// etwas internes SMB/SSH sowie gelegentliche eingehende Scans auf einen per Port-Forwarding erreichbaren Server.
@@ -320,7 +326,9 @@ impl TrafficModel {
             })
             .unwrap_or(&SERVICES[0]);
         let server: IpAddr = self.rng.pick(service.servers).parse().expect("gültige Server-IP");
-        let client = if server.is_ipv6() {
+        let client = if service.port == 53 && !is_private(server) {
+            IpAddr::V4(ROGUE_DNS_CLIENT)
+        } else if server.is_ipv6() {
             *self.rng.pick(&self.clients_v6)
         } else {
             // Die ersten drei Clients erzeugen deutlich mehr Verkehr (Top Talker)
@@ -371,5 +379,13 @@ impl TrafficModel {
             exporter: self.exporter,
             direction: Default::default(),
         }
+    }
+}
+
+/// Interne Adresse im Sinne der Demo (RFC 1918 bzw. ULA).
+fn is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
