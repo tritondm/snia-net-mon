@@ -196,6 +196,7 @@ Eine einzige Datei: `cp config.example.toml config.toml`. Alle Schlüssel sind d
 | `anomaly.host_profiles` / `dynamic_networks` | `true` / leer | Profil je Host, außer in Netzen mit wechselnden Adressen (DHCP) |
 | `anomaly.ignore` | leer | Hosts, die nicht ausgewertet werden |
 | `anomaly.scan_threshold` | `100` | Portscan ab so vielen fehlgeschlagenen Versuchen je Fenster, `0` = aus |
+| `anomaly.scan_min_ports` | `4` | Portscan nur über mindestens so viele verschiedene Ports (Browser erzeugen viele Fehlversuche auf 80/443); Sweeps im LAN melden unabhängig davon |
 | `anomaly.dns_rule` / `dns_servers` | `true` / leer | DNS an externe Resolver melden / erlaubte externe Resolver |
 | `anomaly.dns_clients` | leer | interne Hosts, die extern auflösen dürfen (eigene DNS-Server, Router) |
 | `anomaly.new_country` / `country_learning_days` | `true` / `3` | erstes Land einer Netzgruppe melden; neue Gruppen lernen so viele Tage still, Link-local (169.254/16) nie |

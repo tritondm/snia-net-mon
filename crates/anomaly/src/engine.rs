@@ -291,7 +291,7 @@ impl Engine {
                 }
                 vectors.push(v);
             }
-            if self.cfg.scan_threshold > 0 && h.probes.len() >= self.cfg.scan_threshold {
+            if is_scan(h, self.cfg.scan_threshold, self.cfg.scan_min_ports) {
                 found.push(scan_event(end, &host, &group, h));
             }
             if self.cfg.dns_rule && !h.dns.is_empty() {
@@ -679,6 +679,17 @@ fn fmt_peer(ip: &IpAddr, port: u16) -> String {
     if ip.is_ipv6() { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") }
 }
 
+/// Portscan: genug fehlgeschlagene Versuche, und entweder auf genug verschiedenen Ports (vertikal) oder genug
+/// davon an interne Ziele (Sweep im LAN). Viele abgebrochene Verbindungen nach außen auf 2–3 Ports sind fast
+/// immer ein Browser (Happy Eyeballs, Tracker-Blocker, geschlossene Tabs) und kein Scan.
+fn is_scan(h: &HostWindow, threshold: usize, min_ports: usize) -> bool {
+    if threshold == 0 || h.probes.len() < threshold {
+        return false;
+    }
+    let ports: HashSet<u16> = h.probes.iter().map(|(_, p)| *p).collect();
+    ports.len() >= min_ports || h.probes.iter().filter(|(ip, _)| h.int_peers.contains(ip)).count() >= threshold
+}
+
 fn scan_event(ts: i64, host: &str, group: &str, h: &HostWindow) -> Event {
     let hosts: HashSet<IpAddr> = h.probes.iter().map(|(ip, _)| *ip).collect();
     let mut ports: Vec<u16> = h.probes.iter().map(|(_, p)| *p).collect::<HashSet<_>>().into_iter().collect();
@@ -933,6 +944,32 @@ mod tests {
             }
         }
         w
+    }
+
+    #[test]
+    fn browser_on_few_ports_is_no_scan() {
+        let geo = geo::GeoLookup::disabled();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let mut w = Window::new(0, false);
+        // Browser: 200 abgebrochene Verbindungen nach außen auf 80, 443 und 8443
+        for i in 0..200u16 {
+            let port = [80, 443, 8443][i as usize % 3];
+            w.add(&flow("10.0.1.20", &format!("198.51.{}.{}", i / 250, i % 250 + 1), port, 60, 0x02, Direction::Out), &filters(), &geo);
+        }
+        // echter Scan nach außen: 120 Ports auf einem Ziel
+        for p in 1..=120u16 {
+            w.add(&flow("10.0.1.21", "198.51.100.7", p, 60, 0x02, Direction::Out), &filters(), &geo);
+        }
+        // Sweep im LAN: ein Port, 150 interne Ziele
+        for i in 0..150u16 {
+            w.add(&flow("10.0.1.22", &format!("10.0.2.{}", i % 250), 22, 60, 0x02, Direction::Internal), &filters(), &geo);
+        }
+        let host = |s: &str| &w.hosts[&ip(s)];
+        assert!(!is_scan(host("10.0.1.20"), 100, 4), "Browser auf 3 Ports");
+        assert!(is_scan(host("10.0.1.20"), 100, 3), "mit scan_min_ports = 3 wieder gemeldet");
+        assert!(is_scan(host("10.0.1.21"), 100, 4), "vertikaler Scan");
+        assert!(is_scan(host("10.0.1.22"), 100, 4), "Sweep im LAN auf einem Port");
+        assert!(!is_scan(host("10.0.1.21"), 0, 4), "0 = aus");
     }
 
     #[test]

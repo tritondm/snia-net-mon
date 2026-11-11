@@ -99,6 +99,9 @@ pub struct AnomalyConfig {
     pub dns_rule: bool,
     /// Fehlgeschlagene Verbindungsversuche je Fenster, ab denen ein Portscan gemeldet wird; 0 = aus
     pub scan_threshold: usize,
+    /// So viele verschiedene Ports muss ein Portscan mindestens treffen. Browser erzeugen viele
+    /// unbeantwortete Verbindungen auf 80/443 – das ist kein Scan. Sweeps im eigenen LAN zählen unabhängig davon.
+    pub scan_min_ports: usize,
     pub new_country: bool,
     /// Neue Gruppen (erste Verbindung vor weniger als so vielen Tagen) melden keine neuen Länder, sondern lernen nur
     pub country_learning_days: u64,
@@ -142,6 +145,7 @@ impl Default for AnomalyConfig {
             dns_clients: LocalNetworks::none(),
             dns_rule: true,
             scan_threshold: 100,
+            scan_min_ports: 4,
             new_country: true,
             country_learning_days: 3,
             ml: true,

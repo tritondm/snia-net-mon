@@ -99,7 +99,7 @@ anders als die Geräte in seinem Netz zu dieser Zeit?* Dafür gibt es mehrere Ve
 |---|---|---|
 | **Statistik** (Baseline) | Ein Merkmal liegt mindestens `z_threshold` Standardabweichungen über dem Typischen **und** erreicht den Mindestwert (z. B. 100 MB Upload pro Fenster). Text z. B. „upload 3.0 GiB statt typisch 38 MiB (80×)“ | warnung; hoch, wenn der Isolation Forest zustimmt oder die doppelte Schwelle erreicht ist |
 | **Isolation Forest** (ML) | Gibt jedem Host-Fenster einen Score. Bei statistischen Treffern steht er als zweite Meinung dabei („ml 0.81 ✓ stimmt zu“). Allein meldet er ungewöhnliche *Kombinationen*, bei denen jeder Einzelwert normal ist, samt den stärksten Abweichungen | info |
-| **Portscan** | mindestens `scan_threshold` fehlgeschlagene TCP-Verbindungsversuche (SYN ohne ACK) zu verschiedenen Ziel/Port-Paaren, auch im LAN | hoch |
+| **Portscan** | mindestens `scan_threshold` fehlgeschlagene TCP-Verbindungsversuche (SYN ohne ACK) zu verschiedenen Ziel/Port-Paaren auf mindestens `scan_min_ports` (4) verschiedenen Ports – weniger Ports nach außen sind fast immer ein Browser; Sweeps im LAN melden mit beliebig vielen Ports | hoch |
 | **Externes DNS** | DNS (53/853) an einen Resolver außerhalb, der nicht in `dns_servers` steht | warnung |
 | **Neues Land** | erste Verbindung einer Netzgruppe in ein Land, das sie nie zuvor kontaktiert hat | info |
 | **Beaconing** | ein Host meldet sich in fast gleichen Abständen beim selben externen Ziel, wie Schadsoftware bei ihrem Steuerserver | info, nie per Mail |

@@ -103,7 +103,7 @@ or differently from the devices in its network at this time?* Several methods co
 |---|---|---|
 | **Statistics** (baseline) | A feature is at least `z_threshold` standard deviations above typical **and** reaches the minimum (e.g. 100 MB upload per window). Text e.g. "upload 3.0 GiB statt typisch 38 MiB (80×)" (instead of typically) | warn; high if the Isolation Forest agrees or twice the threshold is reached |
 | **Isolation Forest** (ML) | Gives each host window a score. For statistical hits it is shown as a second opinion ("ml 0.81 ✓ stimmt zu", agrees). On its own it reports unusual *combinations* where each single value is normal, along with the strongest deviations | info |
-| **Port scan** | at least `scan_threshold` failed TCP connection attempts (SYN without ACK) to distinct destination/port pairs, also within the LAN | high |
+| **Port scan** | at least `scan_threshold` failed TCP connection attempts (SYN without ACK) to distinct destination/port pairs, on at least `scan_min_ports` (4) distinct ports – fewer ports to external hosts are almost always a browser; sweeps within the LAN report with any number of ports | high |
 | **External DNS** | DNS (53/853) to a resolver outside that is not listed in `dns_servers` | warn |
 | **New country** | first connection of a network group to a country it has never contacted before | info |
 | **Beaconing** | a host calls the same external destination at almost equal intervals, like malware calling its command server | info, never by mail |

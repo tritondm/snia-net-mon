@@ -121,6 +121,9 @@ ignore = []
 # Portscan: so viele fehlgeschlagene TCP-Verbindungsversuche (SYN ohne ACK) zu verschiedenen Ziel/Port-Paaren
 # in einem Fenster; 0 = aus.
 scan_threshold = 100
+# Nur melden, wenn die Versuche mindestens so viele verschiedene Ports treffen. Viele abgebrochene Verbindungen
+# auf 80/443 sind fast immer ein Browser. Sweeps im eigenen LAN (ein Port, viele interne Hosts) melden trotzdem.
+scan_min_ports = 4
 # DNS (Port 53/853) an externe Resolver statt an den eigenen melden; erlaubte externe Resolver in dns_servers.
 dns_rule = true
 dns_servers = []
